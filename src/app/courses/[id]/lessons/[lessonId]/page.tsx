@@ -14,7 +14,16 @@ export default async function LessonPage({
   const { id, lessonId } = await params;
   const result = await getLessonWithNavigation(id, lessonId);
   if (!result) notFound();
-  const { detail, module, lesson, content, previousLesson, nextLesson, existingProgress } = result;
+  const {
+    detail,
+    module,
+    lesson,
+    content,
+    reviewIssues,
+    previousLesson,
+    nextLesson,
+    existingProgress,
+  } = result;
 
   if (!content) {
     return (
@@ -43,7 +52,12 @@ export default async function LessonPage({
         )}
       </header>
 
-      <LessonBlocks lessonId={lesson.id} content={content} />
+      <LessonBlocks
+        lessonId={lesson.id}
+        content={content}
+        isFlagged={lesson.reviewStatus === "flagged"}
+        reviewIssues={reviewIssues}
+      />
 
       <nav className="lesson-nav" aria-label="Lesson navigation">
         {previousLesson ? (

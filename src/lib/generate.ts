@@ -1,6 +1,6 @@
 import "server-only";
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { type ParsedMessage } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { asc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
@@ -8,10 +8,15 @@ import { courses, lessons, modules } from "@/db/schema";
 import {
   CourseV1,
   LessonContentV1,
+  LessonReviewV1,
   type CourseV1 as Course,
+  type LessonContentV1 as LessonContent,
+  type LessonReviewIssueV1 as LessonReviewIssue,
+  type LessonReviewV1 as LessonReview,
 } from "@/lib/course-schema";
 
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-fable-5";
+const REVIEW_MODEL = "claude-sonnet-5";
 const MAX_TOKENS = 16_000;
 const MAX_RETRIES = 2;
 
@@ -32,12 +37,27 @@ function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function refusalErrorMessage(
+  details: ParsedMessage<unknown>["stop_details"],
+): string {
+  const category = details?.category
+    ? ` Category: ${details.category}.`
+    : "";
+  const explanation = details?.explanation
+    ? ` ${details.explanation}`
+    : "";
+  return `Content declined by safety classifier.${category}${explanation}`;
+}
+
 async function withGenerationRetry<T>(
-  request: () => Promise<{ parsed_output: T | null }>,
+  request: () => Promise<ParsedMessage<T>>,
 ): Promise<T> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     try {
       const response = await request();
+      if (response.stop_reason === "refusal") {
+        throw new Error(refusalErrorMessage(response.stop_details));
+      }
       if (response.parsed_output !== null) return response.parsed_output;
       if (attempt === MAX_RETRIES) {
         throw new Error("Claude returned no parsed structured output.");
@@ -54,7 +74,9 @@ async function withGenerationRetry<T>(
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An unknown generation error occurred.";
+  return error instanceof Error
+    ? error.message
+    : "An unknown generation error occurred.";
 }
 
 async function requestOutline(topic: string): Promise<Course> {
@@ -182,13 +204,79 @@ async function loadGenerationContext(courseId: string) {
   return { outline, moduleRows, lessonRows };
 }
 
+async function reviewLesson({
+  outline,
+  targetLesson,
+  content,
+}: {
+  outline: Course;
+  targetLesson: { title: string; summary: string };
+  content: LessonContent;
+}): Promise<LessonReview> {
+  const review = await withGenerationRetry(() =>
+    getClient().messages.parse({
+      model: REVIEW_MODEL,
+      max_tokens: MAX_TOKENS,
+      thinking: { type: "adaptive" },
+      system:
+        "You are a meticulous course quality reviewer. Evaluate the supplied lesson independently and report only specific, actionable content problems. This review is advisory; do not rewrite the lesson.",
+      messages: [
+        {
+          role: "user",
+          content: `Review this generated lesson in the context of its assigned course outline.
+
+Course and outline context:
+${JSON.stringify(
+  {
+    courseTitle: outline.title,
+    courseDescription: outline.description,
+    outline: outline.modules.map((courseModule) => ({
+      title: courseModule.title,
+      lessons: courseModule.lessons.map((lesson) => ({
+        title: lesson.title,
+        summary: lesson.summary,
+      })),
+    })),
+    targetLesson,
+  },
+  null,
+  2,
+)}
+
+Lesson content:
+${JSON.stringify(content, null, 2)}
+
+Check all of the following:
+- Factual accuracy of claims in every explanation and worked example.
+- Whether the lesson stays within its assigned title and summary.
+- Whether it substantially teaches material owned by another lesson in the outline.
+- Whether every quiz correctIndex points to the actually correct choice.
+- Whether all four per-choice explanations for every quiz question truthfully explain why the corresponding choice is right or wrong.
+
+Return passed=true with an empty issues array only when there are no accuracy, scope, overlap, or quiz problems. Otherwise return passed=false and list each specific issue. Use severity "major" when the problem could materially misteach or misassess the learner; otherwise use "minor".`,
+        },
+      ],
+      output_config: { format: zodOutputFormat(LessonReviewV1) },
+    }),
+  );
+
+  return LessonReviewV1.parse(review);
+}
+
 async function generateLesson(
   courseId: string,
   lessonId: string,
+  issuesToFix: LessonReviewIssue[] = [],
 ): Promise<boolean> {
   await db
     .update(lessons)
-    .set({ status: "generating", content: null, error: null })
+    .set({
+      status: "generating",
+      content: null,
+      error: null,
+      reviewStatus: null,
+      reviewNotes: null,
+    })
     .where(eq(lessons.id, lessonId));
 
   try {
@@ -211,6 +299,15 @@ async function generateLesson(
       const lesson = lessonRows.find((item) => item.id === id);
       return lesson?.title;
     });
+    const reviewFixes =
+      issuesToFix.length > 0
+        ? `
+
+This lesson is being regenerated because a prior quality review found these specific issues:
+${JSON.stringify(issuesToFix, null, 2)}
+
+Correct every listed issue in the new lesson while continuing to meet all of the lesson requirements.`
+        : "";
 
     const content = await withGenerationRetry(() =>
       getClient().messages.parse({
@@ -247,7 +344,7 @@ Requirements:
 - Include exactly one quiz block, and make it the final block.
 - The quiz must contain 2–4 questions.
 - Every quiz question must have exactly 4 choices, a correctIndex from 0–3, and exactly 4 per-choice explanations that explain why each corresponding choice is right or wrong.
-- Cover this lesson's scope deeply without teaching material assigned to other lessons.`,
+- Cover this lesson's scope deeply without teaching material assigned to other lessons.${reviewFixes}`,
           },
         ],
         output_config: { format: zodOutputFormat(LessonContentV1) },
@@ -255,15 +352,43 @@ Requirements:
     );
     const validated = LessonContentV1.parse(content);
 
+    let reviewStatus: "passed" | "flagged" | null = null;
+    let reviewNotes: string | null = null;
+    try {
+      const review = await reviewLesson({
+        outline,
+        targetLesson: { title: target.title, summary: target.summary },
+        content: validated,
+      });
+      reviewStatus = review.passed ? "passed" : "flagged";
+      reviewNotes = review.passed ? null : JSON.stringify(review.issues);
+    } catch (reviewError) {
+      console.warn(
+        `Quality review skipped for lesson ${lessonId}: ${errorMessage(reviewError)}`,
+      );
+    }
+
     await db
       .update(lessons)
-      .set({ status: "ready", content: JSON.stringify(validated), error: null })
+      .set({
+        status: "ready",
+        content: JSON.stringify(validated),
+        error: null,
+        reviewStatus,
+        reviewNotes,
+      })
       .where(eq(lessons.id, lessonId));
     return true;
   } catch (error) {
     await db
       .update(lessons)
-      .set({ status: "failed", error: errorMessage(error), content: null })
+      .set({
+        status: "failed",
+        error: errorMessage(error),
+        content: null,
+        reviewStatus: null,
+        reviewNotes: null,
+      })
       .where(eq(lessons.id, lessonId));
     return false;
   }
@@ -336,9 +461,15 @@ export async function retryFailedLesson(lessonId: string): Promise<boolean> {
     where: eq(lessons.id, lessonId),
   });
   if (!lesson) throw new Error("Lesson not found.");
-  if (lesson.status !== "failed") {
-    throw new Error("Only failed lessons can be retried.");
+  if (lesson.status !== "failed" && lesson.reviewStatus !== "flagged") {
+    throw new Error("Only failed or flagged lessons can be retried.");
   }
+  const issuesToFix =
+    lesson.reviewStatus === "flagged"
+      ? LessonReviewV1.shape.issues.parse(
+          JSON.parse(lesson.reviewNotes ?? "[]"),
+        )
+      : [];
   const courseModule = await db.query.modules.findFirst({
     where: eq(modules.id, lesson.moduleId),
   });
@@ -348,7 +479,11 @@ export async function retryFailedLesson(lessonId: string): Promise<boolean> {
     .update(courses)
     .set({ status: "generating", error: null })
     .where(eq(courses.id, courseModule.courseId));
-  const succeeded = await generateLesson(courseModule.courseId, lessonId);
+  const succeeded = await generateLesson(
+    courseModule.courseId,
+    lessonId,
+    issuesToFix,
+  );
   await refreshCourseStatus(courseModule.courseId);
   return succeeded;
 }

@@ -34,6 +34,8 @@ export const lessons = sqliteTable("lessons", {
   status: text("status").notNull(),
   content: text("content"),
   error: text("error"),
+  reviewStatus: text("review_status", { enum: ["passed", "flagged"] }),
+  reviewNotes: text("review_notes"),
 });
 
 export const progress = sqliteTable("progress", {

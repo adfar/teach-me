@@ -38,7 +38,13 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
         ...courseModule,
         lessons: courseModule.lessons.map((lesson) =>
           lesson.id === lessonId
-            ? { ...lesson, status: "generating", error: null }
+            ? {
+                ...lesson,
+                status: "generating",
+                error: null,
+                reviewStatus: null,
+                reviewIssues: [],
+              }
             : lesson,
         ),
       })),
@@ -107,31 +113,43 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
               {courseModule.lessons.map((lesson) => {
                 const complete = Boolean(lesson.progress?.completedAt);
                 const iconClass = complete ? "complete" : lesson.status;
+                const isFlagged = lesson.reviewStatus === "flagged";
                 return (
                   <li className="lesson-row" key={lesson.id}>
                     <span className={`status-icon ${iconClass}`} aria-label={complete ? "Complete" : lesson.status}>
                       {complete || lesson.status === "ready" ? "✓" : lesson.status === "failed" ? "!" : <span className="spinner" />}
                     </span>
                     <div>
-                      {lesson.status === "ready" ? (
-                        <Link className="lesson-title link" href={`/courses/${detail.course.id}/lessons/${lesson.id}`}>
-                          {lesson.title}
-                        </Link>
-                      ) : (
-                        <span className="lesson-title">{lesson.title}</span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {lesson.status === "ready" ? (
+                          <Link className="lesson-title link" href={`/courses/${detail.course.id}/lessons/${lesson.id}`}>
+                            {lesson.title}
+                          </Link>
+                        ) : (
+                          <span className="lesson-title">{lesson.title}</span>
+                        )}
+                        {isFlagged && (
+                          <span className="badge badge-failed">
+                            Review warning
+                          </span>
+                        )}
+                      </div>
                       <p className="lesson-summary">
                         {lesson.status === "failed" ? lesson.error ?? "Generation failed." : lesson.summary}
                       </p>
                     </div>
-                    {lesson.status === "failed" && (
+                    {(lesson.status === "failed" || isFlagged) && (
                       <button
                         className="retry-button"
                         type="button"
                         onClick={() => retryLesson(lesson.id)}
                         disabled={retrying === lesson.id}
                       >
-                        {retrying === lesson.id ? "Retrying…" : "Retry"}
+                        {retrying === lesson.id
+                          ? "Regenerating…"
+                          : isFlagged
+                            ? "Regenerate"
+                            : "Retry"}
                       </button>
                     )}
                   </li>

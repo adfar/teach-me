@@ -2,13 +2,21 @@ import "server-only";
 
 import { asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { LessonContentV1 } from "@/lib/course-schema";
+import {
+  LessonContentV1,
+  LessonReviewV1,
+  type LessonReviewIssueV1,
+} from "@/lib/course-schema";
 import { db } from "./index";
 import { courses, lessons, modules, progress } from "./schema";
 
 const prerequisitesSchema = z.array(z.string());
 
-export type LessonSummary = Omit<typeof lessons.$inferSelect, "content"> & {
+export type LessonSummary = Omit<
+  typeof lessons.$inferSelect,
+  "content" | "reviewNotes"
+> & {
+  reviewIssues: LessonReviewIssueV1[];
   progress: typeof progress.$inferSelect | null;
 };
 
@@ -30,6 +38,14 @@ export function parseLessonContent(value: string | null): LessonContentV1 {
     throw new Error("This lesson does not have generated content.");
   }
   return LessonContentV1.parse(JSON.parse(value));
+}
+
+export function parseLessonReviewIssues(
+  value: string | null,
+): LessonReviewIssueV1[] {
+  return value
+    ? LessonReviewV1.shape.issues.parse(JSON.parse(value))
+    : [];
 }
 
 export async function getCourseDetail(
@@ -57,6 +73,8 @@ export async function getCourseDetail(
           summary: lessons.summary,
           status: lessons.status,
           error: lessons.error,
+          reviewStatus: lessons.reviewStatus,
+          reviewNotes: lessons.reviewNotes,
           lessonId: progress.lessonId,
           completedAt: progress.completedAt,
           quizScore: progress.quizScore,
@@ -82,6 +100,8 @@ export async function getCourseDetail(
           summary: lesson.summary,
           status: lesson.status,
           error: lesson.error,
+          reviewStatus: lesson.reviewStatus,
+          reviewIssues: parseLessonReviewIssues(lesson.reviewNotes),
           progress: lesson.lessonId
             ? {
                 lessonId: lesson.lessonId,
@@ -126,6 +146,7 @@ export async function getLessonWithNavigation(
     module: currentModule,
     lesson,
     content: lesson.status === "ready" ? parseLessonContent(lesson.content) : null,
+    reviewIssues: orderedLessons[currentIndex].reviewIssues,
     existingProgress: orderedLessons[currentIndex].progress,
     previousLesson: orderedLessons[currentIndex - 1] ?? null,
     nextLesson: orderedLessons[currentIndex + 1] ?? null,

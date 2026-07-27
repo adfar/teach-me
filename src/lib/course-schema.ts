@@ -21,6 +21,17 @@ export const CourseV1 = z.object({
   modules: z.array(ModuleV1).min(3).max(6),
 });
 
+export const LessonReviewIssueV1 = z.object({
+  category: z.enum(["accuracy", "scope", "overlap", "quiz"]),
+  severity: z.enum(["minor", "major"]),
+  description: z.string(),
+});
+
+export const LessonReviewV1 = z.object({
+  passed: z.boolean(),
+  issues: z.array(LessonReviewIssueV1),
+});
+
 export const QuizQuestionV1 = z.object({
   prompt: z.string().min(1),
   choices: z.array(z.string()).length(4),
@@ -105,6 +116,8 @@ export const LessonContentV1 = z
 export type CourseV1 = z.infer<typeof CourseV1>;
 export type ModuleV1 = z.infer<typeof ModuleV1>;
 export type LessonOutlineV1 = z.infer<typeof LessonOutlineV1>;
+export type LessonReviewIssueV1 = z.infer<typeof LessonReviewIssueV1>;
+export type LessonReviewV1 = z.infer<typeof LessonReviewV1>;
 export type LessonContentV1 = z.infer<typeof LessonContentV1>;
 export type LessonBlockV1 = z.infer<typeof LessonBlockV1>;
 export type QuizQuestionV1 = z.infer<typeof QuizQuestionV1>;

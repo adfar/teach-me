@@ -9,7 +9,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "latest",
+    "@anthropic-ai/sdk": "^0.115.0",
     "better-sqlite3": "latest",
     "drizzle-orm": "latest",
     "next": "latest",
