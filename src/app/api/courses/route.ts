@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import {
-  createCourseOutline,
-  failUnresolvedLessons,
-  generateCourseLessons,
-} from "@/lib/generate";
+import { startCourseIntake } from "@/lib/generate";
 
 export const runtime = "nodejs";
 
@@ -16,13 +12,9 @@ export async function POST(request: Request) {
   try {
     const body: unknown = await request.json();
     const { topic } = createCourseRequest.parse(body);
-    const courseId = await createCourseOutline(topic);
+    const { courseId, intakeQuestions } = await startCourseIntake(topic);
 
-    void generateCourseLessons(courseId).catch((error) =>
-      failUnresolvedLessons(courseId, error).catch(() => undefined),
-    );
-
-    return NextResponse.json({ courseId }, { status: 201 });
+    return NextResponse.json({ courseId, intakeQuestions }, { status: 201 });
   } catch (error) {
     const message =
       error instanceof z.ZodError

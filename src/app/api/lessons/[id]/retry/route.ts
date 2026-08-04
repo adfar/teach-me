@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { retryFailedLesson } from "@/lib/generate";
+import {
+  failLessonRetry,
+  prepareLessonRetry,
+  retryFailedLesson,
+} from "@/lib/generate";
 
 export const runtime = "nodejs";
 
@@ -9,8 +13,13 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const ready = await retryFailedLesson(id);
-    return NextResponse.json({ status: ready ? "ready" : "failed" });
+    const retry = await prepareLessonRetry(id);
+
+    void retryFailedLesson(retry).catch((error) =>
+      failLessonRetry(retry, error).catch(() => undefined),
+    );
+
+    return NextResponse.json({ status: "generating" }, { status: 202 });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Retry failed." },

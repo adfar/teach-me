@@ -23,7 +23,7 @@ export function CreateCourseForm() {
       if (!response.ok || !result.courseId) {
         throw new Error(result.error ?? "Could not create that course.");
       }
-      router.push(`/courses/${result.courseId}`);
+      router.push(`/courses/${result.courseId}/intake`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create that course.");
       setSubmitting(false);
@@ -48,11 +48,14 @@ export function CreateCourseForm() {
           autoComplete="off"
         />
         <button className="button" type="submit" disabled={submitting || topic.trim().length < 2}>
-          {submitting ? "Building outline…" : "Create course"}
+          {submitting ? "Preparing questions…" : "Create course"}
         </button>
       </div>
       <p className={`form-note ${error ? "error-text" : ""}`} role="status">
-        {error ?? (submitting ? "Claude is planning a thoughtful learning path." : "")}
+        {error ??
+          (submitting
+            ? "Preparing a short intake so the course fits how you learn."
+            : "")}
       </p>
     </form>
   );

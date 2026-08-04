@@ -3,10 +3,12 @@ import "server-only";
 import { asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import {
-  LessonContentV1,
+  LessonContentAny,
   LessonReviewV1,
+  type LessonContentAny as LessonContent,
   type LessonReviewIssueV1,
 } from "@/lib/course-schema";
+import { lessonGenerationStaleBefore } from "@/lib/generate";
 import { db } from "./index";
 import { courses, lessons, modules, progress } from "./schema";
 
@@ -16,6 +18,7 @@ export type LessonSummary = Omit<
   typeof lessons.$inferSelect,
   "content" | "reviewNotes"
 > & {
+  generationStalled: boolean;
   reviewIssues: LessonReviewIssueV1[];
   progress: typeof progress.$inferSelect | null;
 };
@@ -33,11 +36,11 @@ export function parsePrerequisites(value: string | null): string[] {
   return prerequisitesSchema.parse(JSON.parse(value ?? "[]"));
 }
 
-export function parseLessonContent(value: string | null): LessonContentV1 {
+export function parseLessonContent(value: string | null): LessonContent {
   if (!value) {
     throw new Error("This lesson does not have generated content.");
   }
-  return LessonContentV1.parse(JSON.parse(value));
+  return LessonContentAny.parse(JSON.parse(value));
 }
 
 export function parseLessonReviewIssues(
@@ -62,6 +65,7 @@ export async function getCourseDetail(
     .where(eq(modules.courseId, courseId))
     .orderBy(asc(modules.position));
   const moduleIds = courseModules.map((module) => module.id);
+  const generationStaleBefore = lessonGenerationStaleBefore();
 
   const lessonRows = moduleIds.length
     ? await db
@@ -72,9 +76,13 @@ export async function getCourseDetail(
           title: lessons.title,
           summary: lessons.summary,
           status: lessons.status,
+          generationStartedAt: lessons.generationStartedAt,
           error: lessons.error,
           reviewStatus: lessons.reviewStatus,
           reviewNotes: lessons.reviewNotes,
+          conceptsTaught: lessons.conceptsTaught,
+          plan: lessons.plan,
+          estimatedMinutes: lessons.estimatedMinutes,
           lessonId: progress.lessonId,
           completedAt: progress.completedAt,
           quizScore: progress.quizScore,
@@ -99,8 +107,16 @@ export async function getCourseDetail(
           title: lesson.title,
           summary: lesson.summary,
           status: lesson.status,
+          generationStartedAt: lesson.generationStartedAt,
+          generationStalled:
+            lesson.status === "generating" &&
+            (lesson.generationStartedAt === null ||
+              lesson.generationStartedAt < generationStaleBefore),
           error: lesson.error,
           reviewStatus: lesson.reviewStatus,
+          conceptsTaught: lesson.conceptsTaught,
+          plan: lesson.plan,
+          estimatedMinutes: lesson.estimatedMinutes,
           reviewIssues: parseLessonReviewIssues(lesson.reviewNotes),
           progress: lesson.lessonId
             ? {

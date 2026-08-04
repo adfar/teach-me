@@ -1,0 +1,1 @@
+ALTER TABLE `lessons` ADD `generation_started_at` integer;

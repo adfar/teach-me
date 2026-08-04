@@ -15,6 +15,20 @@
       "when": 1785129208127,
       "tag": "0001_peaceful_changeling",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785884422706,
+      "tag": "0002_gorgeous_pestilence",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785886004437,
+      "tag": "0003_spotty_rafael_vega",
+      "breakpoints": true
     }
   ]
 }

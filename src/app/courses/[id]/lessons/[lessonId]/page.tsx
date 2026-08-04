@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LessonBlocks } from "@/components/LessonBlocks";
+import { LessonPrefetch } from "@/components/LessonPrefetch";
 import { getLessonWithNavigation } from "@/db/queries";
 
 export const runtime = "nodejs";
@@ -38,23 +39,46 @@ export default async function LessonPage({
     );
   }
 
+  const estimatedMinutes =
+    lesson.estimatedMinutes ??
+    (content.schemaVersion === 2 ? content.estimatedMinutes : null);
+
   return (
     <article className="reading-shell">
+      <LessonPrefetch
+        nextLessonId={
+          lesson.status === "ready" && nextLesson?.status === "pending"
+            ? nextLesson.id
+            : null
+        }
+      />
       <Link className="back-link" href={`/courses/${id}`}>← {detail.course.title}</Link>
       <header className="lesson-header">
         <p className="eyebrow">{module.title}</p>
         <h1>{lesson.title}</h1>
         <p>{lesson.summary}</p>
-        {existingProgress?.completedAt && (
-          <span className="lesson-progress-note">
-            Completed · quiz {existingProgress.quizScore}/{existingProgress.quizTotal}
-          </span>
-        )}
+        <div className="lesson-header-meta">
+          {estimatedMinutes && (
+            <span className="lesson-progress-note">
+              About {estimatedMinutes} minutes
+            </span>
+          )}
+          {existingProgress?.completedAt && (
+            <span className="lesson-progress-note">
+              Completed
+              {existingProgress.quizScore !== null &&
+                existingProgress.quizTotal !== null &&
+                ` · quiz ${existingProgress.quizScore}/${existingProgress.quizTotal}`}
+            </span>
+          )}
+        </div>
       </header>
 
       <LessonBlocks
+        courseId={id}
         lessonId={lesson.id}
         content={content}
+        initiallyCompleted={Boolean(existingProgress?.completedAt)}
         isFlagged={lesson.reviewStatus === "flagged"}
         reviewIssues={reviewIssues}
       />

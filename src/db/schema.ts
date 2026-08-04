@@ -10,6 +10,9 @@ export const courses = sqliteTable("courses", {
   schemaVersion: integer("schema_version").notNull().default(1),
   status: text("status").notNull(),
   error: text("error"),
+  learnerProfile: text("learner_profile"),
+  intakeQuestions: text("intake_questions"),
+  outlineApprovedAt: integer("outline_approved_at"),
   createdAt: integer("created_at"),
 });
 
@@ -32,10 +35,14 @@ export const lessons = sqliteTable("lessons", {
   title: text("title").notNull(),
   summary: text("summary").notNull(),
   status: text("status").notNull(),
+  generationStartedAt: integer("generation_started_at"),
   content: text("content"),
   error: text("error"),
   reviewStatus: text("review_status", { enum: ["passed", "flagged"] }),
   reviewNotes: text("review_notes"),
+  conceptsTaught: text("concepts_taught"),
+  plan: text("plan"),
+  estimatedMinutes: integer("estimated_minutes"),
 });
 
 export const progress = sqliteTable("progress", {

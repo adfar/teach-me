@@ -113,6 +113,118 @@ export const LessonContentV1 = z
     }
   });
 
+export const IntakeQuestionV1 = z
+  .object({
+    id: z.string().min(1),
+    question: z.string().min(1),
+    rationale: z.string().min(1),
+    kind: z.enum(["single", "multi", "text"]),
+    options: z.array(z.string().min(1)).max(6),
+  })
+  .superRefine((intakeQuestion, context) => {
+    if (intakeQuestion.kind === "text" && intakeQuestion.options.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "Text questions must have an empty options array.",
+      });
+    }
+    if (
+      intakeQuestion.kind !== "text" &&
+      intakeQuestion.options.length === 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "Single and multi questions must provide answer options.",
+      });
+    }
+  });
+
+export const IntakeQuestionsV1 = z
+  .object({
+    schemaVersion: z.literal(1),
+    questions: z.array(IntakeQuestionV1).min(4).max(6),
+  })
+  .superRefine((intakeQuestions, context) => {
+    const ids = new Set(intakeQuestions.questions.map(({ id }) => id));
+    if (ids.size !== intakeQuestions.questions.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["questions"],
+        message: "Intake question ids must be unique.",
+      });
+    }
+  });
+
+const LearnerAnswerV1 = z.object({
+  questionId: z.string().min(1),
+  question: z.string().min(1),
+  answer: z.union([z.string(), z.array(z.string().min(1)).min(1)]),
+});
+
+export const LearnerProfileV1 = z.object({
+  schemaVersion: z.literal(1),
+  answers: z.array(LearnerAnswerV1),
+  derivedLevel: z.enum(["beginner", "intermediate", "advanced"]),
+  goals: z.string().min(1),
+  background: z.string().min(1),
+});
+
+export const LessonPlanV1 = z.object({
+  schemaVersion: z.literal(1),
+  estimatedMinutes: z.number().int().min(30).max(75),
+  sections: z
+    .array(
+      z.object({
+        heading: z.string().min(1),
+        objective: z.string().min(1),
+        mustCover: z.array(z.string().min(1)).min(1),
+        minutes: z.number().int().min(1),
+      }),
+    )
+    .min(3)
+    .max(7),
+  keyTermsToIntroduce: z.array(z.string().min(1)).min(3),
+});
+
+export const ExerciseBlockV2 = z.object({
+  type: z.literal("exercise"),
+  prompt: z.string().min(1),
+  hint: z.string().min(1),
+  solution: z.string().min(1),
+});
+
+export const LessonSectionBlockV2 = z.discriminatedUnion("type", [
+  ExplanationBlockV1,
+  ExampleBlockV1,
+  CalloutBlockV1,
+  ExerciseBlockV2,
+]);
+
+export const LessonSectionV2 = z.object({
+  heading: z.string().min(1),
+  minutes: z.number().int().min(1),
+  blocks: z.array(LessonSectionBlockV2).min(2),
+});
+
+const KeyTermV2 = z.object({
+  term: z.string().min(1),
+  definition: z.string().min(1),
+});
+
+export const LessonContentV2 = z.object({
+  schemaVersion: z.literal(2),
+  estimatedMinutes: z.number().int().min(30).max(75),
+  keyTerms: z.array(KeyTermV2).min(3),
+  sections: z.array(LessonSectionV2).min(3),
+  quiz: z.object({
+    questions: z.array(QuizQuestionV1).min(3).max(6),
+  }),
+});
+
+export const LessonContentAny = z.union([LessonContentV1, LessonContentV2]);
+
 export type CourseV1 = z.infer<typeof CourseV1>;
 export type ModuleV1 = z.infer<typeof ModuleV1>;
 export type LessonOutlineV1 = z.infer<typeof LessonOutlineV1>;
@@ -121,3 +233,12 @@ export type LessonReviewV1 = z.infer<typeof LessonReviewV1>;
 export type LessonContentV1 = z.infer<typeof LessonContentV1>;
 export type LessonBlockV1 = z.infer<typeof LessonBlockV1>;
 export type QuizQuestionV1 = z.infer<typeof QuizQuestionV1>;
+export type IntakeQuestionV1 = z.infer<typeof IntakeQuestionV1>;
+export type IntakeQuestionsV1 = z.infer<typeof IntakeQuestionsV1>;
+export type LearnerProfileV1 = z.infer<typeof LearnerProfileV1>;
+export type LessonPlanV1 = z.infer<typeof LessonPlanV1>;
+export type ExerciseBlockV2 = z.infer<typeof ExerciseBlockV2>;
+export type LessonSectionBlockV2 = z.infer<typeof LessonSectionBlockV2>;
+export type LessonSectionV2 = z.infer<typeof LessonSectionV2>;
+export type LessonContentV2 = z.infer<typeof LessonContentV2>;
+export type LessonContentAny = z.infer<typeof LessonContentAny>;

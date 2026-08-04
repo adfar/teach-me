@@ -14,8 +14,8 @@ export default async function Home() {
         <p className="eyebrow">Your learning library</p>
         <h1>What do you want to understand?</h1>
         <p className="hero-copy">
-          Name a topic. We’ll shape it into a structured course with focused lessons,
-          worked examples, and quizzes—then keep it here whenever you want to return.
+          Name a topic, then answer a few questions so the pacing, depth, and
+          examples fit you. You’ll review the outline before lessons are written.
         </p>
         <CreateCourseForm />
       </section>

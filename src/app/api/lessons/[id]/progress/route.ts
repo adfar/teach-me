@@ -7,14 +7,25 @@ import { lessons, progress } from "@/db/schema";
 
 export const runtime = "nodejs";
 
-const progressRequest = z
+const scoreProgressRequest = z
   .object({
+    action: z.literal("saveScore"),
     quizScore: z.number().int().min(0),
     quizTotal: z.number().int().positive(),
   })
   .refine((value) => value.quizScore <= value.quizTotal, {
     message: "Quiz score cannot exceed quiz total.",
   });
+
+const completionProgressRequest = z.object({
+  action: z.literal("setCompletion"),
+  completed: z.boolean(),
+});
+
+const progressRequest = z.union([
+  scoreProgressRequest,
+  completionProgressRequest,
+]);
 
 export async function POST(
   request: Request,
@@ -30,19 +41,46 @@ export async function POST(
       return NextResponse.json({ error: "Ready lesson not found." }, { status: 404 });
     }
 
-    const content = parseLessonContent(lesson.content);
-    const quiz = content.blocks.find((block) => block.type === "quiz");
-    if (!quiz || quiz.questions.length !== payload.quizTotal) {
-      return NextResponse.json({ error: "Quiz total does not match." }, { status: 400 });
+    if (payload.action === "saveScore") {
+      const content = parseLessonContent(lesson.content);
+      const quiz =
+        content.schemaVersion === 1
+          ? content.blocks.find((block) => block.type === "quiz")
+          : content.quiz;
+      if (!quiz || quiz.questions.length !== payload.quizTotal) {
+        return NextResponse.json(
+          { error: "Quiz total does not match." },
+          { status: 400 },
+        );
+      }
+
+      await db
+        .insert(progress)
+        .values({
+          lessonId: id,
+          quizScore: payload.quizScore,
+          quizTotal: payload.quizTotal,
+        })
+        .onConflictDoUpdate({
+          target: progress.lessonId,
+          set: {
+            quizScore: payload.quizScore,
+            quizTotal: payload.quizTotal,
+          },
+        });
+      return NextResponse.json({
+        quizScore: payload.quizScore,
+        quizTotal: payload.quizTotal,
+      });
     }
 
-    const completedAt = Date.now();
+    const completedAt = payload.completed ? Date.now() : null;
     await db
       .insert(progress)
-      .values({ lessonId: id, completedAt, ...payload })
+      .values({ lessonId: id, completedAt })
       .onConflictDoUpdate({
         target: progress.lessonId,
-        set: { completedAt, ...payload },
+        set: { completedAt },
       });
     return NextResponse.json({ completedAt });
   } catch (error) {

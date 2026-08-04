@@ -22,7 +22,11 @@ export function Quiz({ lessonId, questions }: { lessonId: string; questions: Qui
       const response = await fetch(`/api/lessons/${lessonId}/progress`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ quizScore: finalScore, quizTotal: questions.length }),
+        body: JSON.stringify({
+          action: "saveScore",
+          quizScore: finalScore,
+          quizTotal: questions.length,
+        }),
       });
       if (!response.ok) throw new Error("Progress could not be saved.");
       setSaveStatus("saved");
@@ -89,7 +93,8 @@ export function Quiz({ lessonId, questions }: { lessonId: string; questions: Qui
           <strong>You scored {score} out of {questions.length}.</strong>
           <p>
             {saveStatus === "saving" && "Saving your progress…"}
-            {saveStatus === "saved" && "Lesson complete. Your progress is saved."}
+            {saveStatus === "saved" &&
+              "Your quiz score is saved. Mark the lesson complete when you’re ready."}
             {saveStatus === "failed" && "Your score is shown, but progress could not be saved. Refresh and try the quiz again."}
           </p>
         </div>
