@@ -157,6 +157,38 @@ export const IntakeQuestionsV1 = z
     }
   });
 
+export const IntakeMessageV1 = z.object({
+  role: z.enum(["assistant", "user"]),
+  content: z.string().trim().min(1),
+});
+
+export const IntakeConversationV1 = z.object({
+  schemaVersion: z.literal(1),
+  messages: z.array(IntakeMessageV1).min(1),
+});
+
+export const IntakeChatResponseV1 = z
+  .object({
+    reply: z.string().trim().min(1),
+    ready: z.boolean(),
+    profile: z
+      .object({
+        derivedLevel: z.enum(["beginner", "intermediate", "advanced"]),
+        goals: z.string().trim().min(1),
+        background: z.string().trim().min(1),
+      })
+      .nullable(),
+  })
+  .superRefine((response, context) => {
+    if (response.ready !== (response.profile !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["profile"],
+        message: "A completed intake must include a learner profile.",
+      });
+    }
+  });
+
 const LearnerAnswerV1 = z.object({
   questionId: z.string().min(1),
   question: z.string().min(1),
@@ -223,7 +255,61 @@ export const LessonContentV2 = z.object({
   }),
 });
 
-export const LessonContentAny = z.union([LessonContentV1, LessonContentV2]);
+export const LessonContentV3 = z
+  .object({
+    schemaVersion: z.literal(3),
+    estimatedMinutes: z.number().int().min(20).max(30),
+    keyTerms: z.array(KeyTermV2).min(3),
+    sections: z.array(LessonSectionV2).min(3).max(4),
+    quiz: z.object({
+      questions: z.array(QuizQuestionV1).min(3).max(6),
+    }),
+  })
+  .superRefine((lesson, context) => {
+    const sectionMinutes = lesson.sections.reduce(
+      (total, section) => total + section.minutes,
+      0,
+    );
+    if (sectionMinutes !== lesson.estimatedMinutes) {
+      context.addIssue({
+        code: "custom",
+        path: ["sections"],
+        message: "Section minutes must sum to the lesson estimate.",
+      });
+    }
+
+    lesson.sections.forEach((section, index) => {
+      if (!section.blocks.some((block) => block.type === "explanation")) {
+        context.addIssue({
+          code: "custom",
+          path: ["sections", index, "blocks"],
+          message: "Each section must include an explanation block.",
+        });
+      }
+    });
+
+    if (
+      !lesson.sections.some((section) =>
+        section.blocks.some((block) => block.type === "example"),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sections"],
+        message: "A lesson must include at least one worked example.",
+      });
+    }
+  });
+
+export const LessonContentStructured = z.union([
+  LessonContentV2,
+  LessonContentV3,
+]);
+export const LessonContentAny = z.union([
+  LessonContentV1,
+  LessonContentV2,
+  LessonContentV3,
+]);
 
 export type CourseV1 = z.infer<typeof CourseV1>;
 export type ModuleV1 = z.infer<typeof ModuleV1>;
@@ -235,10 +321,15 @@ export type LessonBlockV1 = z.infer<typeof LessonBlockV1>;
 export type QuizQuestionV1 = z.infer<typeof QuizQuestionV1>;
 export type IntakeQuestionV1 = z.infer<typeof IntakeQuestionV1>;
 export type IntakeQuestionsV1 = z.infer<typeof IntakeQuestionsV1>;
+export type IntakeMessageV1 = z.infer<typeof IntakeMessageV1>;
+export type IntakeConversationV1 = z.infer<typeof IntakeConversationV1>;
+export type IntakeChatResponseV1 = z.infer<typeof IntakeChatResponseV1>;
 export type LearnerProfileV1 = z.infer<typeof LearnerProfileV1>;
 export type LessonPlanV1 = z.infer<typeof LessonPlanV1>;
 export type ExerciseBlockV2 = z.infer<typeof ExerciseBlockV2>;
 export type LessonSectionBlockV2 = z.infer<typeof LessonSectionBlockV2>;
 export type LessonSectionV2 = z.infer<typeof LessonSectionV2>;
 export type LessonContentV2 = z.infer<typeof LessonContentV2>;
+export type LessonContentV3 = z.infer<typeof LessonContentV3>;
+export type LessonContentStructured = z.infer<typeof LessonContentStructured>;
 export type LessonContentAny = z.infer<typeof LessonContentAny>;

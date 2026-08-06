@@ -17,6 +17,8 @@ import { z } from "zod";
 const MAX_RETRIES = 2;
 const DEFAULT_CODEX_TIMEOUT_MS = 300_000;
 
+export type GenerationEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 let anthropicClient: Anthropic | null = null;
 
 function getClient(): Anthropic {
@@ -158,12 +160,14 @@ function codexSpawnError(error: unknown): CodexGenerationError {
 
 async function runCodex({
   model,
+  effort,
   payload,
   schemaPath,
   outputPath,
   timeoutMilliseconds,
 }: {
   model: string;
+  effort: GenerationEffort;
   payload: string;
   schemaPath: string;
   outputPath: string;
@@ -177,7 +181,7 @@ async function runCodex({
       "-m",
       model,
       "-c",
-      "model_reasoning_effort=high",
+      `model_reasoning_effort=${effort}`,
       "--ephemeral",
       "--skip-git-repo-check",
       "--sandbox",
@@ -302,11 +306,13 @@ async function generateWithSubscription<S extends z.ZodType>({
   system,
   prompt,
   schema,
+  effort,
 }: {
   model: string;
   system: string;
   prompt: string;
   schema: S;
+  effort: GenerationEffort;
 }): Promise<z.infer<S>> {
   const subscriptionEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -329,9 +335,12 @@ async function generateWithSubscription<S extends z.ZodType>({
           systemPrompt: system,
           allowedTools: [],
           tools: [],
-          maxTurns: 8,
+          // Structured output may need a follow-up turn to repair or submit the
+          // schema-constrained result even though this app exposes no tools.
+          maxTurns: 3,
           settingSources: [],
           thinking: { type: "adaptive" },
+          effort,
           outputFormat: {
             type: "json_schema",
             schema: z.toJSONSchema(schema, { target: "draft-7" }),
@@ -401,11 +410,13 @@ async function generateWithCodex<S extends z.ZodType>({
   system,
   prompt,
   schema,
+  effort,
 }: {
   model: string;
   system: string;
   prompt: string;
   schema: S;
+  effort: GenerationEffort;
 }): Promise<z.infer<S>> {
   const identifier = `${process.pid}-${Date.now()}-${randomBytes(12).toString("hex")}`;
   const schemaPath = join(tmpdir(), `teach-me-codex-${identifier}-schema.json`);
@@ -427,6 +438,7 @@ async function generateWithCodex<S extends z.ZodType>({
         });
         await runCodex({
           model,
+          effort,
           payload,
           schemaPath,
           outputPath,
@@ -468,12 +480,14 @@ async function generateWithApi<S extends z.ZodType>({
   prompt,
   schema,
   maxTokens,
+  effort,
 }: {
   model: string;
   system: string;
   prompt: string;
   schema: S;
   maxTokens: number;
+  effort: GenerationEffort;
 }): Promise<z.infer<S>> {
   return withApiGenerationRetry(() =>
     getClient().messages.parse({
@@ -482,7 +496,7 @@ async function generateWithApi<S extends z.ZodType>({
       thinking: { type: "adaptive" },
       system,
       messages: [{ role: "user", content: prompt }],
-      output_config: { format: zodOutputFormat(schema) },
+      output_config: { effort, format: zodOutputFormat(schema) },
     }),
   );
 }
@@ -493,14 +507,16 @@ export async function generateStructured<S extends z.ZodType>(args: {
   prompt: string;
   schema: S;
   maxTokens: number;
+  effort?: GenerationEffort;
   backend?: "api" | "subscription" | "codex";
 }): Promise<z.infer<S>> {
-  const backend = args.backend ?? process.env.GENERATION_BACKEND;
+  const generationArgs = { ...args, effort: args.effort ?? "medium" };
+  const backend = generationArgs.backend ?? process.env.GENERATION_BACKEND;
   if (backend === "subscription") {
-    return generateWithSubscription(args);
+    return generateWithSubscription(generationArgs);
   }
   if (backend === "codex") {
-    return generateWithCodex(args);
+    return generateWithCodex(generationArgs);
   }
-  return generateWithApi(args);
+  return generateWithApi(generationArgs);
 }

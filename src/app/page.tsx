@@ -14,8 +14,8 @@ export default async function Home() {
         <p className="eyebrow">Your learning library</p>
         <h1>What do you want to understand?</h1>
         <p className="hero-copy">
-          Name a topic, then answer a few questions so the pacing, depth, and
-          examples fit you. You’ll review the outline before lessons are written.
+          Name a topic, have a quick conversation about your goal and starting
+          point, and your course designer will build the learning path.
         </p>
         <CreateCourseForm />
       </section>
@@ -54,7 +54,7 @@ export default async function Home() {
         </section>
       ) : (
         <section className="empty-state">
-          <h2>Your first course starts with a question.</h2>
+          <h2>Your first course starts with a conversation.</h2>
           <p>Try “Teach me how neural networks learn” or any topic you’re curious about.</p>
         </section>
       )}

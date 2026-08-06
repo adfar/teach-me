@@ -12,6 +12,7 @@ export const courses = sqliteTable("courses", {
   error: text("error"),
   learnerProfile: text("learner_profile"),
   intakeQuestions: text("intake_questions"),
+  intakeConversation: text("intake_conversation"),
   outlineApprovedAt: integer("outline_approved_at"),
   createdAt: integer("created_at"),
 });

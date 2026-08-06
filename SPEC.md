@@ -24,6 +24,7 @@ API, which has breaking changes newer than most training data.
 
 Define in `src/lib/course-schema.ts`. This versioned Zod schema is the canonical
 shape of every course. All TypeScript types derive from it via `z.infer`.
+Course design and lesson prose must follow [`COURSE_STYLE_GUIDE.md`](./COURSE_STYLE_GUIDE.md).
 
 ```
 CourseV1
@@ -76,8 +77,10 @@ courses
   difficulty    text
   prerequisites text (JSON array)
   schemaVersion integer not null default 1
-  status        text not null      // "generating" | "ready" | "failed"
+  status        text not null      // "intake" | "outlining" | "generating" | "ready" | "failed"
   error         text               // populated when status = "failed"
+  learnerProfile text              // JSON profile synthesized by the intake chat
+  intakeConversation text          // JSON persisted conversation
   createdAt     integer (epoch ms)
 
 modules
@@ -114,7 +117,9 @@ lesson with the outline as context so lessons don't overlap or contradict.
 
 ### Anthropic SDK usage — follow exactly (current API; training priors are stale)
 
-- Model: **`claude-opus-5`** for both passes.
+- Models: **`claude-sonnet-5`** for intake-chat and outline calls;
+  **`claude-opus-5`** for full lesson generation. Both are configurable with
+  `PLANNING_MODEL` and `GENERATION_MODEL`, respectively.
 - Use structured outputs via **`client.messages.parse`** with
   `output_config: { format: zodOutputFormat(Schema) }` where `zodOutputFormat`
   comes from `@anthropic-ai/sdk/helpers/zod`. Read the result from
@@ -123,11 +128,15 @@ lesson with the outline as context so lessons don't overlap or contradict.
   (returns a 400). Note: on Opus 5, thinking is on by default even without
   this field — the explicit setting is equivalent, so it's kept for clarity
   and to pin behavior if the default ever changes.
+- Set output effort to `low` for intake/profile calls and `medium` for outlines,
+  lessons, and reviews. Subscription-backed structured requests expose no tools
+  and allow up to three turns so the SDK can repair or submit a schema-constrained
+  result when needed.
 - **Do not pass `temperature`, `top_p`, or `top_k`** — all three return a 400 on
   Opus models.
 - Do not use assistant-message prefills — they return a 400.
-- `max_tokens: 16000` for both passes (a single lesson or outline fits well
-  within this; stays under SDK HTTP-timeout thresholds without streaming).
+- Use `max_tokens: 4000` for intake/profile/review, `8000` for outlines, and
+  `16000` for full lessons.
 - Structured-output JSON schemas do not support numeric/length constraints
   (`minItems`, `minimum`, etc.) — the Python/TS SDKs strip them and validate
   client-side, which is fine, but express hard requirements (counts, ordering)
@@ -136,39 +145,44 @@ lesson with the outline as context so lessons don't overlap or contradict.
   (`instanceof` checks from the SDK, not message matching) retry up to 2 times
   with exponential backoff; the SDK's built-in retries handle the rest.
 
-### Pass 1 — outline
+### Pass 1 — conversation and outline
 
-One `messages.parse` call. System prompt establishes the app's teaching
-philosophy (clear explanations, concrete examples, build concepts in dependency
-order). User message contains the topic. Output: `CourseV1` (with lesson
-outlines only). Persist the course + modules + lessons rows (`status: "pending"`)
-before starting pass 2.
+Creating a course stores the topic immediately and opens a short conversational
+intake. Each turn asks at most one adaptive follow-up, and the intake ends as
+soon as the desired capability, relevant background, and material constraints
+are clear (three learner replies maximum). The final turn returns the compact
+learner profile. One outline call then produces `CourseV1`; persist its modules
+and pending lessons and start the first lesson automatically. There is no survey
+or outline-approval step.
 
 ### Pass 2 — lessons
 
-For each lesson, one `messages.parse` call producing `LessonContentV1`. The
-prompt includes: course title/description/difficulty, the full outline (module
-and lesson titles + summaries) so the model knows what is covered elsewhere,
-which lessons precede this one, and this lesson's title + summary. Instruct it
-explicitly: markdown prose, at least one worked example, exactly one quiz as the
-final block with 4 choices and 4 per-choice explanations per question, 2–4
-questions.
+For each lesson, one structured generation call produces `LessonContentV3` in
+full. The prompt includes course title/description/difficulty, the outline,
+the compact learner profile, the concept ledger from ready preceding lessons,
+and the target module/lesson. Generate 3–4 substantive sections with worked
+examples and exercises, plus the glossary and final quiz, in that same call.
+Do not build sections through separate calls or resend previously generated
+section text: that creates quadratic prompt growth and quickly exhausts
+subscription token limits. An independently configured review may follow.
+`LessonContentV1` and `LessonContentV2` remain readable for archived courses.
 
-- Run with a **concurrency limit of 3** (simple semaphore; no new dependency
-  needed).
-- Update each lesson row to `generating` → `ready` (with content JSON) or
-  `failed` (with error message) as it completes.
+- Generate lessons on demand. Start the first lesson after outline design, warm
+  the next lesson when the learner opens one, and allow explicit lesson/unit
+  generation from the overview.
+- Update each generated lesson row to `generating` → `ready` (with content JSON)
+  or `failed` (with error message) as it completes.
 - When all lessons are terminal: course `status` = `ready` if all lessons are
   ready, else `failed` (but keep successfully generated lessons).
 
 ### Kickoff and progress
 
-- `POST /api/courses` `{ topic }` → runs pass 1 **awaited** (so validation
-  errors surface in the response), inserts rows, kicks off pass 2 **without
-  awaiting** (fire-and-forget promise; fine in a long-lived local Node server),
-  and returns `{ courseId }` immediately after the outline exists.
+- `POST /api/courses` `{ topic }` → stores an intake course immediately and
+  returns `{ courseId }`.
+- `POST /api/courses/:id/intake` `{ message }` → advances the short chat. Once
+  ready, it starts outline design and first-lesson generation without awaiting.
 - `GET /api/courses/:id` → course + modules + lesson rows (status, no content) —
-  the create page polls this every ~1.5s to render live progress.
+  the overview polls this every ~1.5s while outline or lesson work is active.
 - `POST /api/lessons/:id/retry` → regenerates a single `failed` lesson.
 
 ## 5. Routes and pages
@@ -176,6 +190,7 @@ questions.
 | Route | Purpose |
 |---|---|
 | `/` | Course library: grid of course cards (title, difficulty, module count, per-course progress %, status badge for generating/failed). Prominent "Teach me…" input that POSTs to `/api/courses` and navigates to the course page. Empty state invites the first topic. |
+| `/courses/[id]/intake` | Short conversational intake. One adaptive question at a time; automatically proceeds to course design when enough context is available. |
 | `/courses/[id]` | Course overview: description, prerequisites, module list with lesson links and per-lesson status/progress. While `status = "generating"`, polls and shows a live checklist of lessons filling in (spinner → check). Failed lessons show a retry button. |
 | `/courses/[id]/lessons/[lessonId]` | Lesson reader: renders the block sequence (markdown via react-markdown; callout variants visually distinct; examples in a bordered card). Quiz is interactive: pick an answer per question → immediate right/wrong + the explanation for the chosen answer → after all questions answered, show score, persist to `progress` (via `POST /api/lessons/:id/progress`), and mark the lesson complete. Prev/next lesson navigation across module boundaries. |
 
