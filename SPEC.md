@@ -157,7 +157,7 @@ or outline-approval step.
 
 ### Pass 2 — lessons
 
-For each lesson, one structured generation call produces `LessonContentV3` in
+For each lesson, one structured generation call produces `LessonContentV4` in
 full. The prompt includes course title/description/difficulty, the outline,
 the compact learner profile, the concept ledger from ready preceding lessons,
 and the target module/lesson. Generate 3–4 substantive sections with worked
@@ -165,7 +165,10 @@ examples and exercises, plus the glossary and final quiz, in that same call.
 Do not build sections through separate calls or resend previously generated
 section text: that creates quadratic prompt growth and quickly exhausts
 subscription token limits. An independently configured review may follow.
-`LessonContentV1` and `LessonContentV2` remain readable for archived courses.
+V4 adds structured chart, diagram, and geographic-map blocks plus visual-aware
+exercise and quiz references. Maps render against packaged world/U.S. atlas data;
+charts and diagrams render from validated structured data. `LessonContentV1`,
+`LessonContentV2`, and `LessonContentV3` remain readable for archived courses.
 
 - Generate lessons on demand. Start the first lesson after outline design, warm
   the next lesson when the learner opens one, and allow explicit lesson/unit

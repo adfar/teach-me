@@ -47,6 +47,10 @@ When presenting a process, show the individual steps and explain the purpose of 
 
 When presenting an abstract concept, include at least one concrete example, analogy, scenario, diagram, or demonstration.
 
+When spatial relationships, quantitative comparisons, trends, systems, or sequences are central to the learning outcome, show them as a map, chart, or diagram instead of describing the entire visual in prose. Explain how to read the visual, then ask the learner to draw a conclusion from evidence it contains.
+
+Maps should use authoritative base geography. Charts should expose their underlying values and labels. Visuals must include meaningful captions and alt text, and activities or knowledge checks should reference the visual directly when interpretation is part of the outcome.
+
 ## Learner Assumptions
 
 State any required prior knowledge at the beginning of the course or lesson.

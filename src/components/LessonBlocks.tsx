@@ -7,9 +7,11 @@ import remarkGfm from "remark-gfm";
 import type {
   LessonContentAny,
   LessonReviewIssueV1,
+  VisualBlockV4,
 } from "@/lib/course-schema";
 import type { CourseDetail } from "@/db/queries";
 import { Quiz } from "./Quiz";
+import { LessonVisual } from "./LessonVisual";
 
 function Markdown({ children }: { children: string }) {
   return (
@@ -52,6 +54,16 @@ export function LessonBlocks({
   const minorIssues = reviewIssues.filter(
     (issue) => issue.severity === "minor",
   );
+  const visualsById: Record<string, VisualBlockV4> =
+    content.schemaVersion === 4
+      ? Object.fromEntries(
+          content.sections.flatMap((section) =>
+            section.blocks.flatMap((block) =>
+              block.type === "visual" ? [[block.id, block]] : [],
+            ),
+          ),
+        )
+      : {};
 
   async function regenerateLesson() {
     setIsRegenerating(true);
@@ -267,9 +279,18 @@ export function LessonBlocks({
                       </aside>
                     );
                   }
+                  if (block.type === "visual") {
+                    return <LessonVisual block={block} key={key} />;
+                  }
+                  const referencedVisual = block.visualId
+                    ? visualsById[block.visualId]
+                    : undefined;
                   return (
                     <section className="exercise-card" key={key}>
                       <p className="exercise-label">Try it yourself</p>
+                      {referencedVisual && (
+                        <LessonVisual block={referencedVisual} compact />
+                      )}
                       <Markdown>{block.prompt}</Markdown>
                       <div className="exercise-disclosures">
                         <details>
@@ -288,7 +309,11 @@ export function LessonBlocks({
             </section>
           ))}
 
-          <Quiz lessonId={lessonId} questions={content.quiz.questions} />
+          <Quiz
+            lessonId={lessonId}
+            questions={content.quiz.questions}
+            visualsById={visualsById}
+          />
         </>
       )}
       <section className="lesson-completion" aria-labelledby="lesson-completion-heading">

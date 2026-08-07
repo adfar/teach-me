@@ -213,6 +213,27 @@ p { color: var(--muted); }
 .callout-tip { background: var(--accent-soft); }
 .callout-warning { background: var(--warning-soft); border-color: var(--warning); }
 .callout-analogy { background: var(--analogy-soft); border-color: var(--analogy); }
+.lesson-visual { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.lesson-visual-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 16px 18px 10px; }
+.lesson-visual-heading h3 { margin: 0; font-size: 1rem; }
+.lesson-visual-heading span { color: var(--muted); font-size: .7rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.lesson-visual-svg { display: block; width: 100%; height: auto; min-height: 260px; background: var(--surface-subtle); }
+.lesson-visual figcaption { border-top: 1px solid var(--line); padding: 11px 18px 13px; color: var(--muted); font-size: .86rem; line-height: 1.45; }
+.lesson-visual-compact { margin: 10px 0 16px; }
+.lesson-visual-compact .lesson-visual-svg { min-height: 210px; }
+.visual-grid-line { stroke: var(--line); stroke-width: 1; }
+.visual-axis { stroke: var(--muted); stroke-width: 1.5; }
+.visual-axis-label, .visual-legend-label, .visual-edge-label, .visual-map-label { fill: var(--muted); font-size: 11px; }
+.visual-axis-title { fill: var(--text); font-size: 12px; font-weight: 700; }
+.visual-diagram-edge { stroke: var(--muted); stroke-width: 1.7; }
+.visual-arrow { fill: var(--muted); }
+.visual-diagram-node { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+.visual-node-label { fill: var(--text); font-size: 12px; font-weight: 700; }
+.visual-edge-label, .visual-map-label { paint-order: stroke; stroke: var(--surface-subtle); stroke-width: 4px; stroke-linejoin: round; }
+.visual-map-region { fill: var(--surface); stroke: var(--line); stroke-width: .7; }
+.visual-map-region-highlighted { stroke: var(--text); stroke-width: 1; }
+.visual-map-marker-halo { fill: var(--surface); stroke: var(--danger); stroke-width: 2; }
+.visual-map-marker { fill: var(--danger); }
 .key-terms { border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; background: var(--surface-subtle); }
 .key-terms h2 { margin: 0 0 13px; font-size: 1rem; letter-spacing: 0; }
 .key-terms dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 13px 20px; margin: 0; }

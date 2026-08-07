@@ -9,12 +9,14 @@ import {
   IntakeConversationV1,
   LearnerProfileV1,
   LessonContentStructured,
-  LessonContentV3,
+  LessonContentV4,
+  LessonContentV4Draft,
   LessonReviewV1,
   type CourseV1 as Course,
   type IntakeConversationV1 as IntakeConversation,
   type LearnerProfileV1 as LearnerProfile,
-  type LessonContentV3 as LessonContent,
+  type LessonContentV4 as LessonContent,
+  type LessonContentV4Draft as LessonContentDraft,
   type LessonReviewIssueV1 as LessonReviewIssue,
   type LessonReviewV1 as LessonReview,
 } from "@/lib/course-schema";
@@ -42,6 +44,7 @@ Course-writing rules:
 - Put a brief activity or knowledge check after important material. It must support the stated outcome, cover only taught content, include corrective feedback, and count toward the time estimate.
 - Use clear, direct language appropriate to the learner without sounding childish, overly academic, or needlessly technical. Avoid excessive bullets, fragments, dense prose, and repetitive framing.
 - Begin with the capability the learner will gain, framed by a meaningful question, problem, or use. End by reinforcing the outcome and, when useful, connecting to the next lesson.
+- When learners need to inspect spatial relationships, quantities, or a process, use a map, chart, or diagram instead of describing the visual entirely in prose. Explain how to read it, then ask the learner to reason from it.
 - Never invent facts, sources, statistics, quotations, or purported real events. Qualify uncertainty and time-sensitive or disputed claims.`;
 
 export function lessonGenerationStaleMilliseconds(): number {
@@ -459,6 +462,48 @@ ${JSON.stringify(issuesToFix, null, 2)}
 Correct every listed issue while continuing to meet all lesson requirements.`;
 }
 
+function normalizeLessonVisualReferences(
+  content: LessonContentDraft,
+): LessonContentDraft {
+  const usedVisualIds = new Set<string>();
+  const sectionsWithUniqueVisualIds = content.sections.map((section) => ({
+    ...section,
+    blocks: section.blocks.map((block) => {
+      if (block.type !== "visual") return block;
+
+      let id = block.id;
+      let suffix = 2;
+      while (usedVisualIds.has(id)) {
+        id = `${block.id}-${suffix}`;
+        suffix += 1;
+      }
+      usedVisualIds.add(id);
+      return id === block.id ? block : { ...block, id };
+    }),
+  }));
+
+  return {
+    ...content,
+    sections: sectionsWithUniqueVisualIds.map((section) => ({
+      ...section,
+      blocks: section.blocks.map((block) =>
+        block.type === "exercise" &&
+        block.visualId &&
+        !usedVisualIds.has(block.visualId)
+          ? { ...block, visualId: undefined }
+          : block,
+      ),
+    })),
+    quiz: {
+      questions: content.quiz.questions.map((question) =>
+        question.visualId && !usedVisualIds.has(question.visualId)
+          ? { ...question, visualId: undefined }
+          : question,
+      ),
+    },
+  };
+}
+
 async function requestLessonContent({
   outline,
   learnerProfile,
@@ -512,7 +557,7 @@ ${JSON.stringify({ targetModule, targetLesson }, null, 2)}
 ${COURSE_STYLE_RULES}
 
 Writing requirements:
-- Use schemaVersion 3. Target 20–30 minutes total in 3–4 coherent sections, including examples, activities, and checks. Set each section's minutes and make their sum equal estimatedMinutes.
+- Use schemaVersion 4. Target 20–30 minutes total in 3–4 coherent sections, including examples, activities, and checks. Set each section's minutes and make their sum equal estimatedMinutes.
 - Write all prose in Markdown.
 - Assume the learner knows ONLY what their profile states plus concepts in the ledger. Explain everything else from scratch at first use.
 - Define every new technical term, proper noun, notation, or named concept in plain language before using it in an argument. Never substitute a name for an explanation.
@@ -521,6 +566,12 @@ Writing requirements:
 - Develop one continuous explanatory narrative across sections. Explain ideas step by step and distribute closely matched worked examples wherever they make the material concrete; include at least one in the lesson, but do not force one into a section where it would interrupt the narrative. Show every important intermediate step and why it is valid; never say “it follows that” to skip reasoning.
 - Put an exercise block after each important section as an activity or knowledge check. Every exercise needs a useful hint and a complete solution that diagnoses likely misunderstandings, not merely the answer.
 - Make the final section include a concise narrative conclusion that reinforces the primary outcome and, when appropriate, connects it to the next lesson in the outline.
+- Add visual blocks wherever seeing the information is materially better than verbal description. Geography and spatial-comparison lessons should normally contain a map; quantitative comparisons or trends should use a chart; systems, sequences, and causal relationships should use a diagram.
+- For maps, use exact present-day country or U.S. state names in highlightedRegions and latitude/longitude markers for specific places. The renderer supplies authoritative base geography; do not invent polygon coordinates.
+- For charts, include only values you can state accurately from the lesson context. Never fabricate statistics to make a chart. Prefer a diagram when exact quantitative data is unavailable.
+- Give every visual a unique stable id, useful title and caption, and complete altText that communicates its instructional meaning without merely listing colors.
+- When an exercise or quiz question requires interpreting a visual, set visualId to that visual's id and make the answer depend on evidence visible in it. Do not set visualId for questions that can be answered without the visual.
+- Do not repeat the visual's entire content in nearby prose before asking the learner to interpret it.
 - Use callouts sparingly and only for a genuine warning, tip, or clarifying analogy.
 - Write enough substantive explanation, examples, and practice to occupy the stated time. Never pad with filler, restatement, generic encouragement, or repeated summaries.
 - Depth beats breadth. Teach a few ideas until the learner can use them.
@@ -530,12 +581,12 @@ Writing requirements:
 - Every question must have exactly 4 plausible choices and one correctIndex from 0–3.
 - Supply exactly 4 per-choice explanations for each question, aligned by index, explaining specifically why that choice is right or wrong.
 - Avoid trick wording, trivia, and choices distinguishable by superficial cues.${reviewFixInstructions(issuesToFix)}`,
-    schema: LessonContentV3,
+    schema: LessonContentV4Draft,
     maxTokens: MAX_TOKENS,
     effort: "medium",
   });
 
-  return LessonContentV3.parse(generated);
+  return LessonContentV4.parse(normalizeLessonVisualReferences(generated));
 }
 
 async function reviewLesson({
@@ -577,6 +628,7 @@ ${JSON.stringify(content, null, 2)}
 Check all of the following:
 - Factual accuracy of claims in every explanation and worked example.
 - Whether the lesson follows the supplied 20–30 minute scope and coherent textbook-like narrative rather than reading as disconnected notes.
+- Whether maps, charts, and diagrams are accurate, legible from their structured data, instructionally necessary, and correctly referenced by activities or quiz questions.
 - Whether the lesson stays within its assigned title and summary.
 - Whether it substantially teaches material owned by another lesson in the outline.
 - Whether every quiz correctIndex points to the actually correct choice.

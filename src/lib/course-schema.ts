@@ -34,6 +34,7 @@ export const LessonReviewV1 = z.object({
 
 export const QuizQuestionV1 = z.object({
   prompt: z.string().min(1),
+  visualId: z.string().min(1).optional(),
   choices: z.array(z.string()).length(4),
   correctIndex: z.number().int().min(0).max(3),
   explanations: z.array(z.string()).length(4),
@@ -222,6 +223,7 @@ export const LessonPlanV1 = z.object({
 
 export const ExerciseBlockV2 = z.object({
   type: z.literal("exercise"),
+  visualId: z.string().min(1).optional(),
   prompt: z.string().min(1),
   hint: z.string().min(1),
   solution: z.string().min(1),
@@ -238,6 +240,110 @@ export const LessonSectionV2 = z.object({
   heading: z.string().min(1),
   minutes: z.number().int().min(1),
   blocks: z.array(LessonSectionBlockV2).min(2),
+});
+
+const VisualMetadataV4 = {
+  type: z.literal("visual"),
+  id: z.string().min(1),
+  title: z.string().min(1),
+  caption: z.string().min(1),
+  altText: z.string().min(1),
+};
+
+const ChartVisualBlockV4 = z.object({
+  ...VisualMetadataV4,
+  visual: z.object({
+    kind: z.literal("chart"),
+    chartType: z.enum(["bar", "line", "scatter"]),
+    xLabel: z.string().min(1),
+    yLabel: z.string().min(1),
+    series: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          points: z
+            .array(
+              z.object({
+                label: z.string().min(1),
+                value: z.number(),
+              }),
+            )
+            .min(2)
+            .max(12),
+        }),
+      )
+      .min(1)
+      .max(4),
+  }),
+});
+
+const DiagramVisualBlockV4 = z.object({
+  ...VisualMetadataV4,
+  visual: z.object({
+    kind: z.literal("diagram"),
+    nodes: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          label: z.string().min(1),
+          x: z.number().min(0).max(100),
+          y: z.number().min(0).max(100),
+        }),
+      )
+      .min(2)
+      .max(12),
+    edges: z
+      .array(
+        z.object({
+          from: z.string().min(1),
+          to: z.string().min(1),
+          label: z.string().optional(),
+        }),
+      )
+      .max(20),
+  }),
+});
+
+const MapVisualBlockV4 = z.object({
+  ...VisualMetadataV4,
+  visual: z.object({
+    kind: z.literal("map"),
+    scope: z.enum(["world", "united_states"]),
+    highlightedRegions: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          label: z.string().optional(),
+        }),
+      )
+      .max(20),
+    markers: z
+      .array(
+        z.object({
+          label: z.string().min(1),
+          latitude: z.number().min(-90).max(90),
+          longitude: z.number().min(-180).max(180),
+        }),
+      )
+      .max(20),
+  }),
+});
+
+export const VisualBlockV4 = z.union([
+  ChartVisualBlockV4,
+  DiagramVisualBlockV4,
+  MapVisualBlockV4,
+]);
+
+export const LessonSectionBlockV4 = z.union([
+  LessonSectionBlockV2,
+  VisualBlockV4,
+]);
+
+export const LessonSectionV4 = z.object({
+  heading: z.string().min(1),
+  minutes: z.number().int().min(1),
+  blocks: z.array(LessonSectionBlockV4).min(2),
 });
 
 const KeyTermV2 = z.object({
@@ -301,14 +407,98 @@ export const LessonContentV3 = z
     }
   });
 
+export const LessonContentV4Draft = z.object({
+  schemaVersion: z.literal(4),
+  estimatedMinutes: z.number().int().min(20).max(30),
+  keyTerms: z.array(KeyTermV2).min(3),
+  sections: z.array(LessonSectionV4).min(3).max(4),
+  quiz: z.object({
+    questions: z.array(QuizQuestionV1).min(3).max(6),
+  }),
+});
+
+export const LessonContentV4 = LessonContentV4Draft
+  .superRefine((lesson, context) => {
+    const sectionMinutes = lesson.sections.reduce(
+      (total, section) => total + section.minutes,
+      0,
+    );
+    if (sectionMinutes !== lesson.estimatedMinutes) {
+      context.addIssue({
+        code: "custom",
+        path: ["sections"],
+        message: "Section minutes must sum to the lesson estimate.",
+      });
+    }
+
+    lesson.sections.forEach((section, index) => {
+      if (!section.blocks.some((block) => block.type === "explanation")) {
+        context.addIssue({
+          code: "custom",
+          path: ["sections", index, "blocks"],
+          message: "Each section must include an explanation block.",
+        });
+      }
+    });
+
+    if (
+      !lesson.sections.some((section) =>
+        section.blocks.some((block) => block.type === "example"),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sections"],
+        message: "A lesson must include at least one worked example.",
+      });
+    }
+
+    const visualIds = lesson.sections.flatMap((section) =>
+      section.blocks.flatMap((block) =>
+        block.type === "visual" ? [block.id] : [],
+      ),
+    );
+    if (new Set(visualIds).size !== visualIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["sections"],
+        message: "Visual ids must be unique within a lesson.",
+      });
+    }
+
+    const referencedVisualIds = [
+      ...lesson.sections.flatMap((section) =>
+        section.blocks.flatMap((block) =>
+          block.type === "exercise" && block.visualId
+            ? [block.visualId]
+            : [],
+        ),
+      ),
+      ...lesson.quiz.questions.flatMap((question) =>
+        question.visualId ? [question.visualId] : [],
+      ),
+    ];
+    referencedVisualIds.forEach((visualId) => {
+      if (!visualIds.includes(visualId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["sections"],
+          message: `Visual reference ${visualId} does not match a visual block.`,
+        });
+      }
+    });
+  });
+
 export const LessonContentStructured = z.union([
   LessonContentV2,
   LessonContentV3,
+  LessonContentV4,
 ]);
 export const LessonContentAny = z.union([
   LessonContentV1,
   LessonContentV2,
   LessonContentV3,
+  LessonContentV4,
 ]);
 
 export type CourseV1 = z.infer<typeof CourseV1>;
@@ -329,7 +519,12 @@ export type LessonPlanV1 = z.infer<typeof LessonPlanV1>;
 export type ExerciseBlockV2 = z.infer<typeof ExerciseBlockV2>;
 export type LessonSectionBlockV2 = z.infer<typeof LessonSectionBlockV2>;
 export type LessonSectionV2 = z.infer<typeof LessonSectionV2>;
+export type VisualBlockV4 = z.infer<typeof VisualBlockV4>;
+export type LessonSectionBlockV4 = z.infer<typeof LessonSectionBlockV4>;
+export type LessonSectionV4 = z.infer<typeof LessonSectionV4>;
 export type LessonContentV2 = z.infer<typeof LessonContentV2>;
 export type LessonContentV3 = z.infer<typeof LessonContentV3>;
+export type LessonContentV4Draft = z.infer<typeof LessonContentV4Draft>;
+export type LessonContentV4 = z.infer<typeof LessonContentV4>;
 export type LessonContentStructured = z.infer<typeof LessonContentStructured>;
 export type LessonContentAny = z.infer<typeof LessonContentAny>;
