@@ -345,13 +345,39 @@ function MapVisual({ block }: { block: MapBlock }) {
     regions,
   );
   const path = geoPath(projection);
+  const groupKey = (region: (typeof block.visual.highlightedRegions)[number]) =>
+    region.label
+      ? `label:${normalizeName(region.label)}`
+      : `region:${canonicalRegionName(region.name)}`;
+  const groupKeys = Array.from(
+    new Set(block.visual.highlightedRegions.map(groupKey)),
+  );
+  const labelCounts = new Map<string, number>();
+  block.visual.highlightedRegions.forEach((region) => {
+    if (!region.label) return;
+    const key = normalizeName(region.label);
+    labelCounts.set(key, (labelCounts.get(key) ?? 0) + 1);
+  });
   const highlights = new Map(
-    block.visual.highlightedRegions.map((region, index) => [
+    block.visual.highlightedRegions.map((region) => [
       canonicalRegionName(region.name),
-      { ...region, color: COLORS[index % COLORS.length] },
+      {
+        ...region,
+        color: COLORS[groupKeys.indexOf(groupKey(region)) % COLORS.length],
+      },
     ]),
   );
-  const displayedLegend = block.visual.highlightedRegions.slice(0, 4);
+  const legendEntries = groupKeys.map((key, index) => {
+    const region = block.visual.highlightedRegions.find(
+      (candidate) => groupKey(candidate) === key,
+    );
+    return {
+      key,
+      label: region?.label ?? region?.name ?? "Highlighted region",
+      color: COLORS[index % COLORS.length],
+    };
+  });
+  const displayedLegend = legendEntries.slice(0, 4);
 
   return (
     <svg
@@ -374,7 +400,9 @@ function MapVisual({ block }: { block: MapBlock }) {
             fill={highlight?.color}
             key={name}
           >
-            <title>{highlight?.label ?? name}</title>
+            <title>
+              {highlight?.label ? `${name}: ${highlight.label}` : name}
+            </title>
           </path>
         );
       })}
@@ -390,6 +418,12 @@ function MapVisual({ block }: { block: MapBlock }) {
         );
       })}
       {block.visual.highlightedRegions.flatMap((highlight) => {
+        if (
+          !highlight.label ||
+          (labelCounts.get(normalizeName(highlight.label)) ?? 0) > 1
+        ) {
+          return [];
+        }
         const region = regions.features.find(
           (candidate) =>
             canonicalRegionName(candidate.properties?.name ?? "") ===
@@ -411,17 +445,17 @@ function MapVisual({ block }: { block: MapBlock }) {
         ];
       })}
       <g transform={`translate(18, ${HEIGHT - 28})`}>
-        {displayedLegend.map((region, index) => (
-          <g transform={`translate(${index * 150}, 0)`} key={region.name}>
-            <rect width="12" height="12" rx="2" fill={COLORS[index % COLORS.length]} />
+        {displayedLegend.map((entry, index) => (
+          <g transform={`translate(${index * 150}, 0)`} key={entry.key}>
+            <rect width="12" height="12" rx="2" fill={entry.color} />
             <text className="visual-legend-label" x="18" y="11">
-              {region.label ?? region.name}
+              {entry.label}
             </text>
           </g>
         ))}
-        {block.visual.highlightedRegions.length > displayedLegend.length && (
+        {legendEntries.length > displayedLegend.length && (
           <text className="visual-legend-label" x="618" y="11">
-            +{block.visual.highlightedRegions.length - displayedLegend.length} more
+            +{legendEntries.length - displayedLegend.length} more
           </text>
         )}
       </g>
