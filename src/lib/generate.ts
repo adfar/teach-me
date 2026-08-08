@@ -22,22 +22,6 @@ import {
 } from "@/lib/course-schema";
 import { generateStructured } from "@/lib/llm";
 
-type GenerationBackend = "api" | "subscription" | "codex";
-
-const LESSON_GENERATION_BACKEND = (process.env.LESSON_GENERATION_BACKEND ??
-  "codex") as GenerationBackend;
-const LESSON_MODEL =
-  process.env.GENERATION_MODEL ??
-  (LESSON_GENERATION_BACKEND === "codex"
-    ? "gpt-5.6-sol"
-    : "claude-opus-5");
-const PLANNING_MODEL = process.env.PLANNING_MODEL ?? "claude-sonnet-5";
-const REVIEW_BACKEND = (process.env.REVIEW_BACKEND ?? "api") as
-  GenerationBackend;
-const REVIEW_MODEL =
-  process.env.REVIEW_MODEL ??
-  (REVIEW_BACKEND === "codex" ? "gpt-5.6-sol" : "claude-sonnet-5");
-const MAX_TOKENS = 16_000;
 const DEFAULT_LESSON_GENERATION_STALE_MS = 15 * 60 * 1_000;
 const COURSE_STYLE_RULES = `
 Course-writing rules:
@@ -153,7 +137,6 @@ async function requestIntakeChatTurn(
   ).length;
   const mustFinish = learnerReplyCount >= 3;
   const generated = await generateStructured({
-    model: PLANNING_MODEL,
     system:
       "You are having a brief, natural conversation to understand a learner before designing their course. Ask one useful question at a time, respond to what they actually said, and stop as soon as you have enough context. Never sound like a survey or list multiple questions.",
     prompt: `Continue this intake conversation for a course about ${JSON.stringify(topic)}.
@@ -176,8 +159,6 @@ Rules:
 - The entire intake may contain no more than three learner replies. ${mustFinish ? "This is the third learner reply, so you MUST set ready=true and provide the best faithful profile possible." : "Prefer finishing now when the course can be designed responsibly."}
 - When ready=false, profile must be null. When ready=true, profile must be present.`,
     schema: IntakeChatResponseV1,
-    maxTokens: 2_000,
-    effort: "low",
   });
 
   return IntakeChatResponseV1.parse(generated);
@@ -188,7 +169,6 @@ async function requestOutline(
   learnerProfile: LearnerProfile,
 ): Promise<Course> {
   const generated = await generateStructured({
-    model: PLANNING_MODEL,
     system:
       "You design focused, coherent courses. Order concepts by their dependencies, scope every lesson for deep study, and adapt the course to the learner rather than producing a generic table of contents.",
     prompt: `Create a complete course outline for this request: ${JSON.stringify(topic)}.
@@ -218,8 +198,6 @@ Requirements:
 - Avoid overlap between lessons and avoid assigning a lesson concepts that depend on later lessons.
 - Keep the course focused on the concrete capability in the learner's goals.`,
     schema: CourseV1,
-    maxTokens: 8_000,
-    effort: "medium",
   });
 
   return CourseV1.parse({ ...generated, topic });
@@ -526,7 +504,6 @@ async function requestLessonContent({
   issuesToFix: LessonReviewIssue[];
 }): Promise<LessonContent> {
   const generated = await generateStructured({
-    model: LESSON_MODEL,
     system:
       "You are an expert teacher writing one substantial lesson in a larger course. Teach patiently from the learner's actual knowledge boundary, with precise definitions, causal explanations, fully worked examples, and useful practice.",
     prompt: `Write the complete content for the target lesson.
@@ -588,9 +565,6 @@ Writing requirements:
 - Supply exactly 4 per-choice explanations for each question, aligned by index, explaining specifically why that choice is right or wrong.
 - Avoid trick wording, trivia, and choices distinguishable by superficial cues.${reviewFixInstructions(issuesToFix)}`,
     schema: LessonContentV4Draft,
-    maxTokens: MAX_TOKENS,
-    effort: "medium",
-    backend: LESSON_GENERATION_BACKEND,
   });
 
   return LessonContentV4.parse(normalizeLessonVisualReferences(generated));
@@ -606,7 +580,6 @@ async function reviewLesson({
   content: LessonContent;
 }): Promise<LessonReview> {
   const review = await generateStructured({
-    model: REVIEW_MODEL,
     system:
       "You are a meticulous course quality reviewer. Evaluate the supplied lesson independently and report only specific, actionable content problems. This review is advisory; do not rewrite the lesson.",
     prompt: `Review this generated lesson in the context of its assigned course outline.
@@ -643,9 +616,6 @@ Check all of the following:
 
 List every specific issue you find. Use severity "major" when the problem could materially misteach or misassess the learner; otherwise use "minor" for advisory improvements. Return passed=false only when there is at least one major issue. Minor issues may be present when passed=true.`,
     schema: LessonReviewV1,
-    maxTokens: 4_000,
-    effort: "medium",
-    backend: REVIEW_BACKEND,
   });
 
   return LessonReviewV1.parse(review);

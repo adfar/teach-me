@@ -1,12 +1,5 @@
 import "server-only";
 
-import {
-  query,
-  type SDKAssistantMessageError,
-  type SDKResultMessage,
-} from "@anthropic-ai/claude-agent-sdk";
-import Anthropic, { type ParsedMessage } from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, unlink, writeFile } from "node:fs/promises";
@@ -14,73 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
+const MODEL = "gpt-5.6-sol";
+const REASONING_EFFORT = "high";
 const MAX_RETRIES = 2;
 const DEFAULT_CODEX_TIMEOUT_MS = 300_000;
-
-export type GenerationEffort = "low" | "medium" | "high" | "xhigh" | "max";
-
-let anthropicClient: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. Add it to .env.local and try again.",
-    );
-  }
-  anthropicClient ??= new Anthropic({ apiKey });
-  return anthropicClient;
-}
-
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function refusalErrorMessage(
-  details: ParsedMessage<unknown>["stop_details"],
-): string {
-  const category = details?.category
-    ? ` Category: ${details.category}.`
-    : "";
-  const explanation = details?.explanation
-    ? ` ${details.explanation}`
-    : "";
-  return `Content declined by safety classifier.${category}${explanation}`;
-}
-
-async function withApiGenerationRetry<T>(
-  request: () => Promise<ParsedMessage<T>>,
-): Promise<T> {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const response = await request();
-      if (response.stop_reason === "refusal") {
-        throw new Error(refusalErrorMessage(response.stop_details));
-      }
-      if (response.parsed_output !== null) return response.parsed_output;
-      if (attempt === MAX_RETRIES) {
-        throw new Error("Claude returned no parsed structured output.");
-      }
-    } catch (error) {
-      const retryable =
-        error instanceof Anthropic.RateLimitError ||
-        error instanceof Anthropic.InternalServerError;
-      if (!retryable || attempt === MAX_RETRIES) throw error;
-    }
-    await sleep(1_000 * 2 ** attempt);
-  }
-  throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-class SubscriptionGenerationError extends Error {
-  readonly retryable: boolean;
-
-  constructor(message: string, retryable: boolean) {
-    super(message);
-    this.name = "SubscriptionGenerationError";
-    this.retryable = retryable;
-  }
-}
 
 class CodexGenerationError extends Error {
   readonly retryable: boolean;
@@ -92,15 +22,8 @@ class CodexGenerationError extends Error {
   }
 }
 
-class SubscriptionAuthenticationError extends Error {
-  constructor(details?: string) {
-    const suffix = details ? ` Details: ${details}` : "";
-    super(
-      "Claude subscription authentication failed. Run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN, or sign in with Claude Code on this machine." +
-        suffix,
-    );
-    this.name = "SubscriptionAuthenticationError";
-  }
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function errorMessage(error: unknown): string {
@@ -159,15 +82,11 @@ function codexSpawnError(error: unknown): CodexGenerationError {
 }
 
 async function runCodex({
-  model,
-  effort,
   payload,
   schemaPath,
   outputPath,
   timeoutMilliseconds,
 }: {
-  model: string;
-  effort: GenerationEffort;
   payload: string;
   schemaPath: string;
   outputPath: string;
@@ -179,9 +98,9 @@ async function runCodex({
       "exec",
       "--ignore-user-config",
       "-m",
-      model,
+      MODEL,
       "-c",
-      `model_reasoning_effort=${effort}`,
+      `model_reasoning_effort=${REASONING_EFFORT}`,
       "--ephemeral",
       "--skip-git-repo-check",
       "--sandbox",
@@ -254,169 +173,14 @@ async function runCodex({
   }
 }
 
-function subscriptionResultError(
-  subtype: string,
-  errors: string[],
-  terminalReason?: string,
-  assistantErrors: SDKAssistantMessageError[] = [],
-): Error {
-  const details = [
-    errors.length > 0 ? errors.join("; ") : null,
-    terminalReason ? `terminal reason: ${terminalReason}` : null,
-    assistantErrors.length > 0
-      ? `assistant error: ${assistantErrors.join(", ")}`
-      : null,
-  ]
-    .filter((detail): detail is string => detail !== null)
-    .join("; ");
-  const message = `Claude Agent SDK generation failed (${subtype})${
-    details ? `: ${details}` : "."
-  }`;
-
-  if (
-    assistantErrors.includes("authentication_failed") ||
-    assistantErrors.includes("oauth_org_not_allowed") ||
-    isAuthenticationErrorMessage(message)
-  ) {
-    return new SubscriptionAuthenticationError(message);
-  }
-
-  const retryableAssistantError = assistantErrors.some((error) =>
-    ["rate_limit", "overloaded", "server_error"].includes(error),
-  );
-  const nonRetryableAssistantError = assistantErrors.some((error) =>
-    [
-      "billing_error",
-      "invalid_request",
-      "model_not_found",
-      "max_output_tokens",
-    ].includes(error),
-  );
-  const retryable =
-    !nonRetryableAssistantError &&
-    (retryableAssistantError ||
-      isTransientErrorMessage(message) ||
-      (subtype === "error_during_execution" && assistantErrors.length === 0));
-
-  return new SubscriptionGenerationError(message, retryable);
-}
-
-async function generateWithSubscription<S extends z.ZodType>({
-  model,
+export async function generateStructured<S extends z.ZodType>({
   system,
   prompt,
   schema,
-  effort,
 }: {
-  model: string;
   system: string;
   prompt: string;
   schema: S;
-  effort: GenerationEffort;
-}): Promise<z.infer<S>> {
-  const subscriptionEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key !== "ANTHROPIC_API_KEY" && value !== undefined) {
-      subscriptionEnv[key] = value;
-    }
-  }
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      let resultMessage: SDKResultMessage | undefined;
-      const assistantErrors: SDKAssistantMessageError[] = [];
-      const authenticationErrors: string[] = [];
-
-      for await (const message of query({
-        prompt,
-        options: {
-          env: subscriptionEnv,
-          model,
-          systemPrompt: system,
-          allowedTools: [],
-          tools: [],
-          // Structured output may need a follow-up turn to repair or submit the
-          // schema-constrained result even though this app exposes no tools.
-          maxTurns: 3,
-          settingSources: [],
-          thinking: { type: "adaptive" },
-          effort,
-          outputFormat: {
-            type: "json_schema",
-            schema: z.toJSONSchema(schema, { target: "draft-7" }),
-          },
-        },
-      })) {
-        if (message.type === "assistant" && message.error) {
-          assistantErrors.push(message.error);
-        } else if (message.type === "auth_status" && message.error) {
-          authenticationErrors.push(message.error);
-        } else if (message.type === "result") {
-          resultMessage = message;
-        }
-      }
-
-      if (authenticationErrors.length > 0) {
-        throw new SubscriptionAuthenticationError(
-          authenticationErrors.join("; "),
-        );
-      }
-      if (!resultMessage) {
-        throw new SubscriptionGenerationError(
-          "Claude Agent SDK returned no result message.",
-          true,
-        );
-      }
-      if (resultMessage.subtype !== "success") {
-        throw subscriptionResultError(
-          resultMessage.subtype,
-          resultMessage.errors,
-          resultMessage.terminal_reason,
-          assistantErrors,
-        );
-      }
-      if (resultMessage.structured_output === undefined) {
-        throw new SubscriptionGenerationError(
-          "Claude Agent SDK returned no structured output.",
-          true,
-        );
-      }
-
-      return schema.parse(resultMessage.structured_output);
-    } catch (error) {
-      if (error instanceof z.ZodError) throw error;
-      if (error instanceof SubscriptionAuthenticationError) throw error;
-
-      const message = errorMessage(error);
-      if (isAuthenticationErrorMessage(message)) {
-        throw new SubscriptionAuthenticationError(message);
-      }
-
-      const retryable =
-        error instanceof SubscriptionGenerationError
-          ? error.retryable
-          : isTransientErrorMessage(message);
-      if (!retryable || attempt === MAX_RETRIES) throw error;
-    }
-
-    await sleep(1_000 * 2 ** attempt);
-  }
-
-  throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-async function generateWithCodex<S extends z.ZodType>({
-  model,
-  system,
-  prompt,
-  schema,
-  effort,
-}: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-  effort: GenerationEffort;
 }): Promise<z.infer<S>> {
   const identifier = `${process.pid}-${Date.now()}-${randomBytes(12).toString("hex")}`;
   const schemaPath = join(tmpdir(), `teach-me-codex-${identifier}-schema.json`);
@@ -437,8 +201,6 @@ async function generateWithCodex<S extends z.ZodType>({
           if (error.code !== "ENOENT") throw error;
         });
         await runCodex({
-          model,
-          effort,
           payload,
           schemaPath,
           outputPath,
@@ -472,51 +234,4 @@ async function generateWithCodex<S extends z.ZodType>({
   }
 
   throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-async function generateWithApi<S extends z.ZodType>({
-  model,
-  system,
-  prompt,
-  schema,
-  maxTokens,
-  effort,
-}: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-  maxTokens: number;
-  effort: GenerationEffort;
-}): Promise<z.infer<S>> {
-  return withApiGenerationRetry(() =>
-    getClient().messages.parse({
-      model,
-      max_tokens: maxTokens,
-      thinking: { type: "adaptive" },
-      system,
-      messages: [{ role: "user", content: prompt }],
-      output_config: { effort, format: zodOutputFormat(schema) },
-    }),
-  );
-}
-
-export async function generateStructured<S extends z.ZodType>(args: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-  maxTokens: number;
-  effort?: GenerationEffort;
-  backend?: "api" | "subscription" | "codex";
-}): Promise<z.infer<S>> {
-  const generationArgs = { ...args, effort: args.effort ?? "medium" };
-  const backend = generationArgs.backend ?? process.env.GENERATION_BACKEND;
-  if (backend === "subscription") {
-    return generateWithSubscription(generationArgs);
-  }
-  if (backend === "codex") {
-    return generateWithCodex(generationArgs);
-  }
-  return generateWithApi(generationArgs);
 }
