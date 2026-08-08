@@ -115,11 +115,19 @@ predev script) so `npm run dev` works from a fresh clone with zero manual steps.
 Two-pass design. **Pass 1** creates the course outline; **pass 2** fills in each
 lesson with the outline as context so lessons don't overlap or contradict.
 
+### Backend and model usage
+
+- Intake-chat and outline calls use **`claude-sonnet-5`** through the configured
+  Anthropic API or subscription backend. Full lesson generation uses
+  **`gpt-5.6-sol`** through the locally authenticated Codex CLI at `medium`
+  reasoning effort. Configure these roles independently with `PLANNING_MODEL`,
+  `GENERATION_BACKEND`, `GENERATION_MODEL`, and `LESSON_GENERATION_BACKEND`.
+- Codex lesson generation uses the same JSON Schema and Zod validation contract
+  as Anthropic generation. It runs ephemerally with a read-only sandbox and no
+  tools, so the model can write the lesson but cannot modify the repository.
+
 ### Anthropic SDK usage — follow exactly (current API; training priors are stale)
 
-- Models: **`claude-sonnet-5`** for intake-chat and outline calls;
-  **`claude-opus-5`** for full lesson generation. Both are configurable with
-  `PLANNING_MODEL` and `GENERATION_MODEL`, respectively.
 - Use structured outputs via **`client.messages.parse`** with
   `output_config: { format: zodOutputFormat(Schema) }` where `zodOutputFormat`
   comes from `@anthropic-ai/sdk/helpers/zod`. Read the result from
@@ -222,7 +230,10 @@ token-by-token lesson display, non-English content, deployment config.
 
 ---
 
-## 8. Phase 2 — Fable 5 migration
+## 8. Superseded plan — Fable 5 migration
+
+This proposed provider upgrade is retained as historical design context. It was
+superseded by the active GPT-5.6 Sol lesson-generation route documented in §4.
 
 Generation model changes from `claude-opus-5` to **`claude-fable-5`** for both
 passes (outline + lesson). This is not a pure constant swap — Fable 5 changes

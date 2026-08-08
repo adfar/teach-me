@@ -22,12 +22,18 @@ import {
 } from "@/lib/course-schema";
 import { generateStructured } from "@/lib/llm";
 
-const MODEL = process.env.GENERATION_MODEL ?? "claude-opus-5";
+type GenerationBackend = "api" | "subscription" | "codex";
+
+const LESSON_GENERATION_BACKEND = (process.env.LESSON_GENERATION_BACKEND ??
+  "codex") as GenerationBackend;
+const LESSON_MODEL =
+  process.env.GENERATION_MODEL ??
+  (LESSON_GENERATION_BACKEND === "codex"
+    ? "gpt-5.6-sol"
+    : "claude-opus-5");
 const PLANNING_MODEL = process.env.PLANNING_MODEL ?? "claude-sonnet-5";
 const REVIEW_BACKEND = (process.env.REVIEW_BACKEND ?? "api") as
-  | "api"
-  | "subscription"
-  | "codex";
+  GenerationBackend;
 const REVIEW_MODEL =
   process.env.REVIEW_MODEL ??
   (REVIEW_BACKEND === "codex" ? "gpt-5.6-sol" : "claude-sonnet-5");
@@ -520,7 +526,7 @@ async function requestLessonContent({
   issuesToFix: LessonReviewIssue[];
 }): Promise<LessonContent> {
   const generated = await generateStructured({
-    model: MODEL,
+    model: LESSON_MODEL,
     system:
       "You are an expert teacher writing one substantial lesson in a larger course. Teach patiently from the learner's actual knowledge boundary, with precise definitions, causal explanations, fully worked examples, and useful practice.",
     prompt: `Write the complete content for the target lesson.
@@ -584,6 +590,7 @@ Writing requirements:
     schema: LessonContentV4Draft,
     maxTokens: MAX_TOKENS,
     effort: "medium",
+    backend: LESSON_GENERATION_BACKEND,
   });
 
   return LessonContentV4.parse(normalizeLessonVisualReferences(generated));
