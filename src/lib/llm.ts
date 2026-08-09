@@ -10,7 +10,7 @@ import { z } from "zod";
 const MODEL = "gpt-5.6-sol";
 const REASONING_EFFORT = "high";
 const MAX_RETRIES = 2;
-const DEFAULT_CODEX_TIMEOUT_MS = 300_000;
+const DEFAULT_CODEX_TIMEOUT_MS = 900_000;
 
 class CodexGenerationError extends Error {
   readonly retryable: boolean;
@@ -31,7 +31,17 @@ function errorMessage(error: unknown): string {
 }
 
 function isAuthenticationErrorMessage(message: string): boolean {
-  return /(auth(?:entication|orization)?(?:[_ -]?failed)?|credentials?|not logged in|login|oauth|unauthorized|401)/i.test(
+  return /(?:\bauth(?:entication|orization)?[_ -](?:failed|error|required)\b|\bnot logged in\b|\blogin required\b|\bplease (?:run )?`?codex login|\bunauthorized\b|\binvalid (?:api key|access token|credentials?)\b|\bexpired (?:access )?token\b|\b401\b)/i.test(message);
+}
+
+function isUsageLimitErrorMessage(message: string): boolean {
+  return /(?:\b(?:session|usage|spending|rate)[ _-]?limit\b|\bhit your .*limit\b|\bmaximum number of turns\b|\binsufficient[_ -]?quota\b|\bquota exceeded\b)/i.test(
+    message,
+  );
+}
+
+function isInvalidRequestErrorMessage(message: string): boolean {
+  return /(?:\binvalid[_ -]?request[_ -]?error\b|\binvalid[_ -]?json[_ -]?schema\b|\bmodel[_ -]?not[_ -]?found\b|\bunsupported (?:model|parameter|response format)\b)/i.test(
     message,
   );
 }
@@ -56,11 +66,76 @@ function codexTimeoutMilliseconds(): number {
   return milliseconds;
 }
 
+function schemaAllowsNull(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return false;
+  }
+  const record = schema as Record<string, unknown>;
+  if (record.type === "null") return true;
+  if (Array.isArray(record.type) && record.type.includes("null")) return true;
+  return [record.anyOf, record.oneOf].some(
+    (variants) => Array.isArray(variants) && variants.some(schemaAllowsNull),
+  );
+}
+
+function codexCompatibleSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(codexCompatibleSchema);
+  if (!schema || typeof schema !== "object") return schema;
+
+  const source = schema as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    normalized[key === "oneOf" ? "anyOf" : key] = codexCompatibleSchema(value);
+  }
+
+  if (
+    normalized.properties &&
+    typeof normalized.properties === "object" &&
+    !Array.isArray(normalized.properties)
+  ) {
+    const properties = normalized.properties as Record<string, unknown>;
+    const required = Array.isArray(normalized.required)
+      ? new Set(
+          normalized.required.filter(
+            (key): key is string => typeof key === "string",
+          ),
+        )
+      : new Set<string>();
+    const optionalKeys = Object.keys(properties).filter(
+      (key) => !required.has(key),
+    );
+    const nonNullableOptional = optionalKeys.find(
+      (key) => !schemaAllowsNull(properties[key]),
+    );
+    if (nonNullableOptional) {
+      throw new CodexGenerationError(
+        `Structured output field ${nonNullableOptional} must be nullable when it is optional.`,
+        false,
+      );
+    }
+    normalized.required = Object.keys(properties);
+  }
+
+  return normalized;
+}
+
 function codexDiagnostic(stdout: string, stderr: string): string {
-  const diagnostic = [stderr.trim(), stdout.trim()]
-    .filter(Boolean)
-    .join("\n");
-  return diagnostic ? ` Details: ${diagnostic.slice(0, 4_000)}` : "";
+  const promptEndMarker = "--- END USER PROMPT ---";
+  const withoutPromptTranscript = (value: string) => {
+    const markerIndex = value.lastIndexOf(promptEndMarker);
+    return (markerIndex >= 0
+      ? value.slice(markerIndex + promptEndMarker.length)
+      : value
+    ).trim();
+  };
+  const diagnostic = [
+    ...new Set(
+      [withoutPromptTranscript(stderr), withoutPromptTranscript(stdout)].filter(
+        Boolean,
+      ),
+    ),
+  ].join("\n");
+  return diagnostic ? ` Details: ${diagnostic.slice(-4_000)}` : "";
 }
 
 function codexSpawnError(error: unknown): CodexGenerationError {
@@ -156,7 +231,7 @@ async function runCodex({
   if (result.timedOut) {
     throw new CodexGenerationError(
       `Codex CLI timed out after ${timeoutMilliseconds}ms and was terminated.${diagnostic}`,
-      true,
+      false,
     );
   }
   if (result.code !== 0) {
@@ -166,6 +241,18 @@ async function runCodex({
     if (isAuthenticationErrorMessage(message)) {
       throw new CodexGenerationError(
         `Codex CLI authentication failed. Run \`codex login\` on this machine and try again.${diagnostic}`,
+        false,
+      );
+    }
+    if (isUsageLimitErrorMessage(message)) {
+      throw new CodexGenerationError(
+        `Codex CLI reached an account, session, or rate limit. Generation was stopped without retrying.${diagnostic}`,
+        false,
+      );
+    }
+    if (isInvalidRequestErrorMessage(message)) {
+      throw new CodexGenerationError(
+        `Codex rejected the generation request. Generation was stopped without retrying.${diagnostic}`,
         false,
       );
     }
@@ -191,7 +278,11 @@ export async function generateStructured<S extends z.ZodType>({
   try {
     await writeFile(
       schemaPath,
-      JSON.stringify(z.toJSONSchema(schema, { target: "draft-7" })),
+      JSON.stringify(
+        codexCompatibleSchema(
+          z.toJSONSchema(schema, { target: "draft-7" }),
+        ),
+      ),
       { flag: "wx" },
     );
 

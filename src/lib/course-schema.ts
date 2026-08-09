@@ -34,7 +34,7 @@ export const LessonReviewV1 = z.object({
 
 export const QuizQuestionV1 = z.object({
   prompt: z.string().min(1),
-  visualId: z.string().min(1).optional(),
+  visualId: z.string().min(1).nullable().optional(),
   choices: z.array(z.string()).length(4),
   correctIndex: z.number().int().min(0).max(3),
   explanations: z.array(z.string()).length(4),
@@ -223,13 +223,16 @@ export const LessonPlanV1 = z.object({
 
 export const ExerciseBlockV2 = z.object({
   type: z.literal("exercise"),
-  visualId: z.string().min(1).optional(),
+  visualId: z.string().min(1).nullable().optional(),
   prompt: z.string().min(1),
   hint: z.string().min(1),
   solution: z.string().min(1),
 });
 
-export const LessonSectionBlockV2 = z.discriminatedUnion("type", [
+// Codex structured outputs accepts `anyOf` but rejects the `oneOf` emitted by
+// Zod discriminated unions. The literal `type` fields still provide the same
+// runtime discrimination when Zod parses the generated lesson.
+export const LessonSectionBlockV2 = z.union([
   ExplanationBlockV1,
   ExampleBlockV1,
   CalloutBlockV1,
@@ -297,7 +300,7 @@ const DiagramVisualBlockV4 = z.object({
         z.object({
           from: z.string().min(1),
           to: z.string().min(1),
-          label: z.string().optional(),
+          label: z.string().nullable().optional(),
         }),
       )
       .max(20),
@@ -313,7 +316,7 @@ const MapVisualBlockV4 = z.object({
       .array(
         z.object({
           name: z.string().min(1),
-          label: z.string().optional(),
+          label: z.string().nullable().optional(),
         }),
       )
       .max(20),
