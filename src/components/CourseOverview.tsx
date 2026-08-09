@@ -7,23 +7,25 @@ import type { CourseDetail } from "@/db/queries";
 export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail }) {
   const [detail, setDetail] = useState(initialDetail);
   const [retrying, setRetrying] = useState<string | null>(null);
-  const [courseAction, setCourseAction] = useState<
-    "approve" | "regenerate" | null
-  >(null);
   const [generatingLessons, setGeneratingLessons] = useState<Set<string>>(
     () => new Set(),
   );
   const [generatingModules, setGeneratingModules] = useState<Set<string>>(
     () => new Set(),
   );
-  const [outlineFeedback, setOutlineFeedback] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const allLessons = detail.modules.flatMap((courseModule) => courseModule.lessons);
   const hasActiveLessons = allLessons.some(
     (lesson) => lesson.status === "generating" && !lesson.generationStalled,
   );
+  const awaitingFirstLesson =
+    detail.course.status === "generating" &&
+    allLessons.length > 0 &&
+    allLessons.every((lesson) => lesson.status === "pending");
   const shouldPoll =
-    detail.course.status === "outlining" || hasActiveLessons;
+    detail.course.status === "outlining" ||
+    awaitingFirstLesson ||
+    hasActiveLessons;
 
   useEffect(() => {
     if (!shouldPoll) return;
@@ -59,64 +61,6 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
         ),
       })),
     }));
-  }
-
-  async function approveCourse() {
-    setCourseAction("approve");
-    setActionError(null);
-    try {
-      const response = await fetch(
-        `/api/courses/${detail.course.id}/outline/approve`,
-        { method: "POST" },
-      );
-      const result: { error?: string } = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error ?? "Could not start this course.");
-      }
-      setDetail((current) => ({
-        ...current,
-        course: { ...current.course, status: "generating", error: null },
-      }));
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Could not start this course.",
-      );
-    } finally {
-      setCourseAction(null);
-    }
-  }
-
-  async function regenerateCourseOutline() {
-    const feedback = outlineFeedback.trim();
-    if (!feedback) return;
-
-    setCourseAction("regenerate");
-    setActionError(null);
-    try {
-      const response = await fetch(
-        `/api/courses/${detail.course.id}/outline/regenerate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ feedback }),
-        },
-      );
-      const result: { error?: string } = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error ?? "Could not revise this outline.");
-      }
-      setOutlineFeedback("");
-      setDetail((current) => ({
-        ...current,
-        course: { ...current.course, status: "outlining", error: null },
-      }));
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Could not revise this outline.",
-      );
-    } finally {
-      setCourseAction(null);
-    }
   }
 
   async function generateLesson(lessonId: string) {
@@ -252,8 +196,8 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
         <section className="course-state-card">
           <h2>Finish shaping your course</h2>
           <p>
-            Answer the short intake so the outline can match your goals,
-            experience, and available time.
+            Continue the short conversation so the course designer understands
+            your goal and starting point.
           </p>
           <Link
             className="button"
@@ -267,83 +211,9 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
       {detail.course.status === "outlining" && (
         <div className="generation-banner" role="status">
           <span className="spinner" aria-hidden="true" />
-          Your answers are being turned into a course outline. This page will
-          update when it is ready to review.
+          Your learning path is being designed and the first lesson will begin
+          generating automatically.
         </div>
-      )}
-
-      {detail.course.status === "outline_review" && (
-        <section className="outline-review" aria-labelledby="outline-heading">
-          <div className="outline-review-heading">
-            <div>
-              <p className="eyebrow">Draft outline</p>
-              <h2 id="outline-heading">Review your learning path</h2>
-              <p>
-                Check the sequence and scope below. Lessons are not written until
-                you approve it.
-              </p>
-            </div>
-            <button
-              className="button"
-              type="button"
-              onClick={approveCourse}
-              disabled={courseAction !== null}
-            >
-              {courseAction === "approve" ? "Starting…" : "Start this course"}
-            </button>
-          </div>
-
-          <div className="module-list outline-module-list">
-            {detail.modules.map((courseModule, moduleIndex) => (
-              <section className="module-card" key={courseModule.id}>
-                <div className="module-heading">
-                  <p className="module-number">Module {moduleIndex + 1}</p>
-                  <h3>{courseModule.title}</h3>
-                  <p className="module-objective">{courseModule.objective}</p>
-                </div>
-                <ol className="outline-lesson-list">
-                  {courseModule.lessons.map((lesson, lessonIndex) => (
-                    <li key={lesson.id}>
-                      <span className="outline-lesson-number">
-                        {lessonIndex + 1}
-                      </span>
-                      <div>
-                        <strong>{lesson.title}</strong>
-                        <p>{lesson.summary}</p>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            ))}
-          </div>
-
-          <div className="outline-change-card">
-            <label htmlFor="outline-feedback">Request changes</label>
-            <p>
-              Describe what should be added, removed, reordered, or taught at a
-              different depth.
-            </p>
-            <textarea
-              className="outline-feedback"
-              id="outline-feedback"
-              rows={4}
-              value={outlineFeedback}
-              onChange={(event) => setOutlineFeedback(event.target.value)}
-              disabled={courseAction !== null}
-            />
-            <button
-              className="button button-secondary"
-              type="button"
-              onClick={regenerateCourseOutline}
-              disabled={!outlineFeedback.trim() || courseAction !== null}
-            >
-              {courseAction === "regenerate"
-                ? "Revising outline…"
-                : "Revise this outline"}
-            </button>
-          </div>
-        </section>
       )}
 
       {hasActiveLessons && (
@@ -361,7 +231,6 @@ export function CourseOverview({ initialDetail }: { initialDetail: CourseDetail 
       {actionError && <p className="error-text" role="alert">{actionError}</p>}
 
       {detail.modules.length > 0 &&
-        detail.course.status !== "outline_review" &&
         detail.course.status !== "outlining" &&
         detail.course.status !== "intake" && (
       <div className="module-list">

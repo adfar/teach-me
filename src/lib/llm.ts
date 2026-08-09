@@ -1,12 +1,5 @@
 import "server-only";
 
-import {
-  query,
-  type SDKAssistantMessageError,
-  type SDKResultMessage,
-} from "@anthropic-ai/claude-agent-sdk";
-import Anthropic, { type ParsedMessage } from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, unlink, writeFile } from "node:fs/promises";
@@ -14,71 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
+const MODEL = "gpt-5.6-sol";
+const REASONING_EFFORT = "high";
 const MAX_RETRIES = 2;
-const DEFAULT_CODEX_TIMEOUT_MS = 300_000;
-
-let anthropicClient: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. Add it to .env.local and try again.",
-    );
-  }
-  anthropicClient ??= new Anthropic({ apiKey });
-  return anthropicClient;
-}
-
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function refusalErrorMessage(
-  details: ParsedMessage<unknown>["stop_details"],
-): string {
-  const category = details?.category
-    ? ` Category: ${details.category}.`
-    : "";
-  const explanation = details?.explanation
-    ? ` ${details.explanation}`
-    : "";
-  return `Content declined by safety classifier.${category}${explanation}`;
-}
-
-async function withApiGenerationRetry<T>(
-  request: () => Promise<ParsedMessage<T>>,
-): Promise<T> {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const response = await request();
-      if (response.stop_reason === "refusal") {
-        throw new Error(refusalErrorMessage(response.stop_details));
-      }
-      if (response.parsed_output !== null) return response.parsed_output;
-      if (attempt === MAX_RETRIES) {
-        throw new Error("Claude returned no parsed structured output.");
-      }
-    } catch (error) {
-      const retryable =
-        error instanceof Anthropic.RateLimitError ||
-        error instanceof Anthropic.InternalServerError;
-      if (!retryable || attempt === MAX_RETRIES) throw error;
-    }
-    await sleep(1_000 * 2 ** attempt);
-  }
-  throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-class SubscriptionGenerationError extends Error {
-  readonly retryable: boolean;
-
-  constructor(message: string, retryable: boolean) {
-    super(message);
-    this.name = "SubscriptionGenerationError";
-    this.retryable = retryable;
-  }
-}
+const DEFAULT_CODEX_TIMEOUT_MS = 900_000;
 
 class CodexGenerationError extends Error {
   readonly retryable: boolean;
@@ -90,15 +22,8 @@ class CodexGenerationError extends Error {
   }
 }
 
-class SubscriptionAuthenticationError extends Error {
-  constructor(details?: string) {
-    const suffix = details ? ` Details: ${details}` : "";
-    super(
-      "Claude subscription authentication failed. Run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN, or sign in with Claude Code on this machine." +
-        suffix,
-    );
-    this.name = "SubscriptionAuthenticationError";
-  }
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function errorMessage(error: unknown): string {
@@ -106,7 +31,17 @@ function errorMessage(error: unknown): string {
 }
 
 function isAuthenticationErrorMessage(message: string): boolean {
-  return /(auth(?:entication|orization)?(?:[_ -]?failed)?|credentials?|not logged in|login|oauth|unauthorized|401)/i.test(
+  return /(?:\bauth(?:entication|orization)?[_ -](?:failed|error|required)\b|\bnot logged in\b|\blogin required\b|\bplease (?:run )?`?codex login|\bunauthorized\b|\binvalid (?:api key|access token|credentials?)\b|\bexpired (?:access )?token\b|\b401\b)/i.test(message);
+}
+
+function isUsageLimitErrorMessage(message: string): boolean {
+  return /(?:\b(?:session|usage|spending|rate)[ _-]?limit\b|\bhit your .*limit\b|\bmaximum number of turns\b|\binsufficient[_ -]?quota\b|\bquota exceeded\b)/i.test(
+    message,
+  );
+}
+
+function isInvalidRequestErrorMessage(message: string): boolean {
+  return /(?:\binvalid[_ -]?request[_ -]?error\b|\binvalid[_ -]?json[_ -]?schema\b|\bmodel[_ -]?not[_ -]?found\b|\bunsupported (?:model|parameter|response format)\b)/i.test(
     message,
   );
 }
@@ -131,11 +66,76 @@ function codexTimeoutMilliseconds(): number {
   return milliseconds;
 }
 
+function schemaAllowsNull(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return false;
+  }
+  const record = schema as Record<string, unknown>;
+  if (record.type === "null") return true;
+  if (Array.isArray(record.type) && record.type.includes("null")) return true;
+  return [record.anyOf, record.oneOf].some(
+    (variants) => Array.isArray(variants) && variants.some(schemaAllowsNull),
+  );
+}
+
+function codexCompatibleSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(codexCompatibleSchema);
+  if (!schema || typeof schema !== "object") return schema;
+
+  const source = schema as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    normalized[key === "oneOf" ? "anyOf" : key] = codexCompatibleSchema(value);
+  }
+
+  if (
+    normalized.properties &&
+    typeof normalized.properties === "object" &&
+    !Array.isArray(normalized.properties)
+  ) {
+    const properties = normalized.properties as Record<string, unknown>;
+    const required = Array.isArray(normalized.required)
+      ? new Set(
+          normalized.required.filter(
+            (key): key is string => typeof key === "string",
+          ),
+        )
+      : new Set<string>();
+    const optionalKeys = Object.keys(properties).filter(
+      (key) => !required.has(key),
+    );
+    const nonNullableOptional = optionalKeys.find(
+      (key) => !schemaAllowsNull(properties[key]),
+    );
+    if (nonNullableOptional) {
+      throw new CodexGenerationError(
+        `Structured output field ${nonNullableOptional} must be nullable when it is optional.`,
+        false,
+      );
+    }
+    normalized.required = Object.keys(properties);
+  }
+
+  return normalized;
+}
+
 function codexDiagnostic(stdout: string, stderr: string): string {
-  const diagnostic = [stderr.trim(), stdout.trim()]
-    .filter(Boolean)
-    .join("\n");
-  return diagnostic ? ` Details: ${diagnostic.slice(0, 4_000)}` : "";
+  const promptEndMarker = "--- END USER PROMPT ---";
+  const withoutPromptTranscript = (value: string) => {
+    const markerIndex = value.lastIndexOf(promptEndMarker);
+    return (markerIndex >= 0
+      ? value.slice(markerIndex + promptEndMarker.length)
+      : value
+    ).trim();
+  };
+  const diagnostic = [
+    ...new Set(
+      [withoutPromptTranscript(stderr), withoutPromptTranscript(stdout)].filter(
+        Boolean,
+      ),
+    ),
+  ].join("\n");
+  return diagnostic ? ` Details: ${diagnostic.slice(-4_000)}` : "";
 }
 
 function codexSpawnError(error: unknown): CodexGenerationError {
@@ -157,13 +157,11 @@ function codexSpawnError(error: unknown): CodexGenerationError {
 }
 
 async function runCodex({
-  model,
   payload,
   schemaPath,
   outputPath,
   timeoutMilliseconds,
 }: {
-  model: string;
   payload: string;
   schemaPath: string;
   outputPath: string;
@@ -175,9 +173,9 @@ async function runCodex({
       "exec",
       "--ignore-user-config",
       "-m",
-      model,
+      MODEL,
       "-c",
-      "model_reasoning_effort=high",
+      `model_reasoning_effort=${REASONING_EFFORT}`,
       "--ephemeral",
       "--skip-git-repo-check",
       "--sandbox",
@@ -233,7 +231,7 @@ async function runCodex({
   if (result.timedOut) {
     throw new CodexGenerationError(
       `Codex CLI timed out after ${timeoutMilliseconds}ms and was terminated.${diagnostic}`,
-      true,
+      false,
     );
   }
   if (result.code !== 0) {
@@ -246,163 +244,27 @@ async function runCodex({
         false,
       );
     }
+    if (isUsageLimitErrorMessage(message)) {
+      throw new CodexGenerationError(
+        `Codex CLI reached an account, session, or rate limit. Generation was stopped without retrying.${diagnostic}`,
+        false,
+      );
+    }
+    if (isInvalidRequestErrorMessage(message)) {
+      throw new CodexGenerationError(
+        `Codex rejected the generation request. Generation was stopped without retrying.${diagnostic}`,
+        false,
+      );
+    }
     throw new CodexGenerationError(message, true);
   }
 }
 
-function subscriptionResultError(
-  subtype: string,
-  errors: string[],
-  terminalReason?: string,
-  assistantErrors: SDKAssistantMessageError[] = [],
-): Error {
-  const details = [
-    errors.length > 0 ? errors.join("; ") : null,
-    terminalReason ? `terminal reason: ${terminalReason}` : null,
-    assistantErrors.length > 0
-      ? `assistant error: ${assistantErrors.join(", ")}`
-      : null,
-  ]
-    .filter((detail): detail is string => detail !== null)
-    .join("; ");
-  const message = `Claude Agent SDK generation failed (${subtype})${
-    details ? `: ${details}` : "."
-  }`;
-
-  if (
-    assistantErrors.includes("authentication_failed") ||
-    assistantErrors.includes("oauth_org_not_allowed") ||
-    isAuthenticationErrorMessage(message)
-  ) {
-    return new SubscriptionAuthenticationError(message);
-  }
-
-  const retryableAssistantError = assistantErrors.some((error) =>
-    ["rate_limit", "overloaded", "server_error"].includes(error),
-  );
-  const nonRetryableAssistantError = assistantErrors.some((error) =>
-    [
-      "billing_error",
-      "invalid_request",
-      "model_not_found",
-      "max_output_tokens",
-    ].includes(error),
-  );
-  const retryable =
-    !nonRetryableAssistantError &&
-    (retryableAssistantError ||
-      isTransientErrorMessage(message) ||
-      (subtype === "error_during_execution" && assistantErrors.length === 0));
-
-  return new SubscriptionGenerationError(message, retryable);
-}
-
-async function generateWithSubscription<S extends z.ZodType>({
-  model,
+export async function generateStructured<S extends z.ZodType>({
   system,
   prompt,
   schema,
 }: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-}): Promise<z.infer<S>> {
-  const subscriptionEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key !== "ANTHROPIC_API_KEY" && value !== undefined) {
-      subscriptionEnv[key] = value;
-    }
-  }
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      let resultMessage: SDKResultMessage | undefined;
-      const assistantErrors: SDKAssistantMessageError[] = [];
-      const authenticationErrors: string[] = [];
-
-      for await (const message of query({
-        prompt,
-        options: {
-          env: subscriptionEnv,
-          model,
-          systemPrompt: system,
-          allowedTools: [],
-          tools: [],
-          maxTurns: 8,
-          settingSources: [],
-          thinking: { type: "adaptive" },
-          outputFormat: {
-            type: "json_schema",
-            schema: z.toJSONSchema(schema, { target: "draft-7" }),
-          },
-        },
-      })) {
-        if (message.type === "assistant" && message.error) {
-          assistantErrors.push(message.error);
-        } else if (message.type === "auth_status" && message.error) {
-          authenticationErrors.push(message.error);
-        } else if (message.type === "result") {
-          resultMessage = message;
-        }
-      }
-
-      if (authenticationErrors.length > 0) {
-        throw new SubscriptionAuthenticationError(
-          authenticationErrors.join("; "),
-        );
-      }
-      if (!resultMessage) {
-        throw new SubscriptionGenerationError(
-          "Claude Agent SDK returned no result message.",
-          true,
-        );
-      }
-      if (resultMessage.subtype !== "success") {
-        throw subscriptionResultError(
-          resultMessage.subtype,
-          resultMessage.errors,
-          resultMessage.terminal_reason,
-          assistantErrors,
-        );
-      }
-      if (resultMessage.structured_output === undefined) {
-        throw new SubscriptionGenerationError(
-          "Claude Agent SDK returned no structured output.",
-          true,
-        );
-      }
-
-      return schema.parse(resultMessage.structured_output);
-    } catch (error) {
-      if (error instanceof z.ZodError) throw error;
-      if (error instanceof SubscriptionAuthenticationError) throw error;
-
-      const message = errorMessage(error);
-      if (isAuthenticationErrorMessage(message)) {
-        throw new SubscriptionAuthenticationError(message);
-      }
-
-      const retryable =
-        error instanceof SubscriptionGenerationError
-          ? error.retryable
-          : isTransientErrorMessage(message);
-      if (!retryable || attempt === MAX_RETRIES) throw error;
-    }
-
-    await sleep(1_000 * 2 ** attempt);
-  }
-
-  throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-async function generateWithCodex<S extends z.ZodType>({
-  model,
-  system,
-  prompt,
-  schema,
-}: {
-  model: string;
   system: string;
   prompt: string;
   schema: S;
@@ -416,7 +278,11 @@ async function generateWithCodex<S extends z.ZodType>({
   try {
     await writeFile(
       schemaPath,
-      JSON.stringify(z.toJSONSchema(schema, { target: "draft-7" })),
+      JSON.stringify(
+        codexCompatibleSchema(
+          z.toJSONSchema(schema, { target: "draft-7" }),
+        ),
+      ),
       { flag: "wx" },
     );
 
@@ -426,7 +292,6 @@ async function generateWithCodex<S extends z.ZodType>({
           if (error.code !== "ENOENT") throw error;
         });
         await runCodex({
-          model,
           payload,
           schemaPath,
           outputPath,
@@ -460,47 +325,4 @@ async function generateWithCodex<S extends z.ZodType>({
   }
 
   throw new Error("Generation retry loop ended unexpectedly.");
-}
-
-async function generateWithApi<S extends z.ZodType>({
-  model,
-  system,
-  prompt,
-  schema,
-  maxTokens,
-}: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-  maxTokens: number;
-}): Promise<z.infer<S>> {
-  return withApiGenerationRetry(() =>
-    getClient().messages.parse({
-      model,
-      max_tokens: maxTokens,
-      thinking: { type: "adaptive" },
-      system,
-      messages: [{ role: "user", content: prompt }],
-      output_config: { format: zodOutputFormat(schema) },
-    }),
-  );
-}
-
-export async function generateStructured<S extends z.ZodType>(args: {
-  model: string;
-  system: string;
-  prompt: string;
-  schema: S;
-  maxTokens: number;
-  backend?: "api" | "subscription" | "codex";
-}): Promise<z.infer<S>> {
-  const backend = args.backend ?? process.env.GENERATION_BACKEND;
-  if (backend === "subscription") {
-    return generateWithSubscription(args);
-  }
-  if (backend === "codex") {
-    return generateWithCodex(args);
-  }
-  return generateWithApi(args);
 }

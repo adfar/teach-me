@@ -5,33 +5,37 @@ import { db } from "@/db";
 import { courses, lessons, modules } from "@/db/schema";
 import {
   CourseV1,
-  IntakeQuestionsV1,
+  IntakeChatResponseV1,
+  IntakeConversationV1,
   LearnerProfileV1,
-  LessonContentV2,
-  LessonPlanV1,
+  LessonContentStructured,
+  LessonContentV4,
+  LessonContentV4Draft,
   LessonReviewV1,
-  LessonSectionV2,
   type CourseV1 as Course,
-  type IntakeQuestionsV1 as IntakeQuestions,
+  type IntakeConversationV1 as IntakeConversation,
   type LearnerProfileV1 as LearnerProfile,
-  type LessonContentV2 as LessonContent,
-  type LessonPlanV1 as LessonPlan,
+  type LessonContentV4 as LessonContent,
+  type LessonContentV4Draft as LessonContentDraft,
   type LessonReviewIssueV1 as LessonReviewIssue,
   type LessonReviewV1 as LessonReview,
-  type LessonSectionV2 as LessonSection,
 } from "@/lib/course-schema";
 import { generateStructured } from "@/lib/llm";
 
-const MODEL = process.env.GENERATION_MODEL ?? "claude-opus-5";
-const REVIEW_BACKEND = (process.env.REVIEW_BACKEND ?? "api") as
-  | "api"
-  | "subscription"
-  | "codex";
-const REVIEW_MODEL =
-  process.env.REVIEW_MODEL ??
-  (REVIEW_BACKEND === "codex" ? "gpt-5.6-sol" : "claude-sonnet-5");
-const MAX_TOKENS = 16_000;
 const DEFAULT_LESSON_GENERATION_STALE_MS = 15 * 60 * 1_000;
+const COURSE_STYLE_RULES = `
+Course-writing rules:
+- Scope each lesson for 20–30 total minutes, including reading, examples, activities, and checks. Give it one primary outcome and at most two or three tightly related supporting outcomes. Split material instead of compressing it.
+- Write like a coherent textbook, not a study guide or glossary. Build a narrative from why the topic matters, through prior knowledge and new ideas, into examples and application, then a concise conclusion and connection forward.
+- Use paragraphs as the main teaching form. Headings, lists, tables, and callouts may support the narrative but never replace it.
+- Define unfamiliar vocabulary in plain language at first use, demonstrate it in context, and use terminology consistently. Never rely on additional unexplained terms.
+- Explain both what and why. Move from simple to complex, show every important process step and its purpose, and distribute concrete examples throughout.
+- Assume only prerequisites explicitly stated in the learner profile or concepts taught earlier. Briefly reactivate earlier ideas when needed.
+- Put a brief activity or knowledge check after important material. It must support the stated outcome, cover only taught content, include corrective feedback, and count toward the time estimate.
+- Use clear, direct language appropriate to the learner without sounding childish, overly academic, or needlessly technical. Avoid excessive bullets, fragments, dense prose, and repetitive framing.
+- Begin with the capability the learner will gain, framed by a meaningful question, problem, or use. End by reinforcing the outcome and, when useful, connecting to the next lesson.
+- When learners need to inspect spatial relationships, quantities, or a process, use a map, chart, or diagram instead of describing the visual entirely in prose. Explain how to read it, then ask the learner to reason from it.
+- Never invent facts, sources, statistics, quotations, or purported real events. Qualify uncertainty and time-sensitive or disputed claims.`;
 
 export function lessonGenerationStaleMilliseconds(): number {
   const value = process.env.LESSON_GENERATION_STALE_MS;
@@ -60,32 +64,6 @@ function staleLessonGeneration(staleBefore: number) {
   );
 }
 
-const GeneratedSectionBlocksV2 = LessonSectionV2.pick({
-  blocks: true,
-}).superRefine((section, context) => {
-  if (!section.blocks.some((block) => block.type === "explanation")) {
-    context.addIssue({
-      code: "custom",
-      path: ["blocks"],
-      message: "A section must contain an explanation block.",
-    });
-  }
-  if (!section.blocks.some((block) => block.type === "example")) {
-    context.addIssue({
-      code: "custom",
-      path: ["blocks"],
-      message: "A section must contain a worked example block.",
-    });
-  }
-});
-
-const LessonFinishV2 = LessonContentV2.pick({
-  keyTerms: true,
-  quiz: true,
-});
-
-type LearnerAnswers = LearnerProfile["answers"];
-
 type ConceptLedgerEntry = {
   lesson: string;
   keyTerms: string[];
@@ -98,33 +76,23 @@ function errorMessage(error: unknown): string {
     : "An unknown generation error occurred.";
 }
 
-async function requestIntakeQuestions(topic: string): Promise<IntakeQuestions> {
-  const generated = await generateStructured({
-    model: MODEL,
-    system:
-      "You design concise learner-intake interviews. Ask only questions whose answers will materially change a course outline or the depth, examples, exercises, and pacing of its lessons.",
-    prompt: `Create the intake interview for a course about ${JSON.stringify(topic)}.
-
-Requirements:
-- Use schemaVersion 1 and create 4–6 questions with stable, descriptive ids.
-- Collect all five of these signals: what the learner wants to be able to DO after the course; their current background and adjacent knowledge; their specific prior exposure to this exact topic; their available time budget per lesson; and how theoretical versus applied they want the teaching to be.
-- Combine signals in one question only when the result remains easy to answer.
-- Use single or multi choice when a short set of choices will produce cleaner information, with no more than 6 options.
-- Use text when individual detail matters, and always return an empty options array for text questions.
-- Explain in one sentence in rationale how each answer will affect course design.
-- Do not ask for information that does not change the course.`,
-    schema: IntakeQuestionsV1,
-    maxTokens: MAX_TOKENS,
+export function initialIntakeConversation(topic: string): IntakeConversation {
+  return IntakeConversationV1.parse({
+    schemaVersion: 1,
+    messages: [
+      {
+        role: "assistant",
+        content: `Let's make this useful. When you finish a course about ${topic}, what would you like to understand or be able to do?`,
+      },
+    ],
   });
-
-  return IntakeQuestionsV1.parse(generated);
 }
 
-async function createIntakeCourse(topic: string): Promise<{
+export async function startCourseIntake(topic: string): Promise<{
   courseId: string;
-  intakeQuestions: IntakeQuestions;
+  conversation: IntakeConversation;
 }> {
-  const intakeQuestions = await requestIntakeQuestions(topic);
+  const conversation = initialIntakeConversation(topic);
   const courseId = crypto.randomUUID();
 
   db.insert(courses)
@@ -133,120 +101,90 @@ async function createIntakeCourse(topic: string): Promise<{
       topic,
       schemaVersion: 1,
       status: "intake",
-      intakeQuestions: JSON.stringify(intakeQuestions),
+      intakeConversation: JSON.stringify(conversation),
       createdAt: Date.now(),
     })
     .run();
 
-  return { courseId, intakeQuestions };
+  return { courseId, conversation };
 }
 
-export async function startCourseIntake(topic: string): Promise<{
-  courseId: string;
-  intakeQuestions: IntakeQuestions;
-}> {
-  return createIntakeCourse(topic);
+function conversationAnswers(
+  conversation: IntakeConversation,
+): LearnerProfile["answers"] {
+  return conversation.messages.flatMap((message, index) => {
+    if (message.role !== "user") return [];
+    const question = conversation.messages[index - 1];
+    return [
+      {
+        questionId: `chat-${index}`,
+        question:
+          question?.role === "assistant"
+            ? question.content
+            : "Additional learner context",
+        answer: message.content,
+      },
+    ];
+  });
 }
 
-export async function generateIntakeQuestions(
+async function requestIntakeChatTurn(
   topic: string,
-): Promise<IntakeQuestions> {
-  const { intakeQuestions } = await createIntakeCourse(topic);
-  return intakeQuestions;
-}
-
-async function requestLearnerProfile(
-  topic: string,
-  answers: LearnerAnswers,
-): Promise<LearnerProfile> {
+  conversation: IntakeConversation,
+) {
+  const learnerReplyCount = conversation.messages.filter(
+    ({ role }) => role === "user",
+  ).length;
+  const mustFinish = learnerReplyCount >= 3;
   const generated = await generateStructured({
-    model: MODEL,
     system:
-      "You synthesize learner intake answers into a faithful, practical teaching profile. Infer conservatively: never invent experience or knowledge the learner did not state.",
-    prompt: `Synthesize a learner profile for a course about ${JSON.stringify(topic)}.
+      "You are having a brief, natural conversation to understand a learner before designing their course. Ask one useful question at a time, respond to what they actually said, and stop as soon as you have enough context. Never sound like a survey or list multiple questions.",
+    prompt: `Continue this intake conversation for a course about ${JSON.stringify(topic)}.
 
-Raw intake answers:
-${JSON.stringify(answers, null, 2)}
+Conversation:
+${JSON.stringify(conversation.messages, null, 2)}
 
-Requirements:
-- Use schemaVersion 1 and reproduce the raw answers exactly.
-- Set derivedLevel to beginner, intermediate, or advanced based on demonstrated topic-specific knowledge, not confidence or ambition.
-- Summarize in goals the concrete capability the learner wants and their preferred balance of theory and application.
-- Summarize in background only the knowledge and experience they explicitly reported, including relevant adjacent knowledge and exact-topic exposure.
-- Include the learner's lesson time budget in goals so downstream planning can respect it.
-- If information is missing, say so plainly instead of guessing.`,
-    schema: LearnerProfileV1,
-    maxTokens: MAX_TOKENS,
+You need only enough information to determine:
+- the concrete capability or understanding the learner wants;
+- their relevant background and prior exposure to this topic;
+- any preference or constraint that would materially affect examples, emphasis, or sequencing.
+
+Rules:
+- Ask at most one short follow-up in reply.
+- Do not ask for information already provided or ask generic learning-style questions.
+- If the existing conversation provides enough context, set ready=true, briefly acknowledge the goal, and provide a conservative profile.
+- Set derivedLevel from demonstrated topic-specific knowledge, not confidence or ambition.
+- In goals, capture the concrete desired capability and any useful emphasis or constraint.
+- In background, include only knowledge or experience the learner actually reported; say what is unknown instead of guessing.
+- The entire intake may contain no more than three learner replies. ${mustFinish ? "This is the third learner reply, so you MUST set ready=true and provide the best faithful profile possible." : "Prefer finishing now when the course can be designed responsibly."}
+- When ready=false, profile must be null. When ready=true, profile must be present.`,
+    schema: IntakeChatResponseV1,
   });
 
-  return LearnerProfileV1.parse({ ...generated, answers });
-}
-
-function normalizeIntakeAnswers(
-  intakeQuestions: IntakeQuestions,
-  answers: LearnerAnswers,
-): LearnerAnswers {
-  const parsed = LearnerProfileV1.shape.answers.parse(answers);
-  const byQuestionId = new Map(parsed.map((answer) => [answer.questionId, answer]));
-
-  if (
-    byQuestionId.size !== parsed.length ||
-    parsed.length !== intakeQuestions.questions.length
-  ) {
-    throw new Error("Submit exactly one answer for every intake question.");
-  }
-
-  return intakeQuestions.questions.map((intakeQuestion) => {
-    const supplied = byQuestionId.get(intakeQuestion.id);
-    if (!supplied) {
-      throw new Error(`Missing answer for intake question ${intakeQuestion.id}.`);
-    }
-
-    if (intakeQuestion.kind === "multi") {
-      if (!Array.isArray(supplied.answer)) {
-        throw new Error(`Question ${intakeQuestion.id} requires multiple choices.`);
-      }
-      if (
-        supplied.answer.some(
-          (choice) => !intakeQuestion.options.includes(choice),
-        )
-      ) {
-        throw new Error(`Question ${intakeQuestion.id} has an invalid choice.`);
-      }
-    } else if (Array.isArray(supplied.answer)) {
-      throw new Error(`Question ${intakeQuestion.id} requires one text answer.`);
-    } else if (
-      intakeQuestion.kind === "single" &&
-      !intakeQuestion.options.includes(supplied.answer)
-    ) {
-      throw new Error(`Question ${intakeQuestion.id} has an invalid choice.`);
-    }
-
-    return {
-      questionId: intakeQuestion.id,
-      question: intakeQuestion.question,
-      answer: supplied.answer,
-    };
-  });
+  return IntakeChatResponseV1.parse(generated);
 }
 
 async function requestOutline(
   topic: string,
   learnerProfile: LearnerProfile,
-  feedback = "",
 ): Promise<Course> {
-  const feedbackInstructions = feedback.trim()
-    ? `\n\nThe learner rejected the previous outline and gave this feedback:\n${JSON.stringify(feedback.trim())}\nRevise the course design to address every actionable point without contradicting the learner profile.`
-    : "";
-
   const generated = await generateStructured({
-    model: MODEL,
     system:
       "You design focused, coherent courses. Order concepts by their dependencies, scope every lesson for deep study, and adapt the course to the learner rather than producing a generic table of contents.",
     prompt: `Create a complete course outline for this request: ${JSON.stringify(topic)}.
 
 Learner profile:
-${JSON.stringify(learnerProfile, null, 2)}
+${JSON.stringify(
+  {
+    derivedLevel: learnerProfile.derivedLevel,
+    goals: learnerProfile.goals,
+    background: learnerProfile.background,
+  },
+  null,
+  2,
+)}
+
+${COURSE_STYLE_RULES}
 
 Requirements:
 - Preserve the user's request exactly in the topic field and use schemaVersion 1.
@@ -254,12 +192,12 @@ Requirements:
 - Write a 2–3 sentence description.
 - Create 3–6 modules in dependency order and 2–5 lessons per module.
 - Give every module a concrete learning objective.
-- Scope every lesson for 30–60 minutes of genuine study. Give it a 1–2 sentence summary stating exactly what it will teach.
+- Scope every lesson for 20–30 minutes of genuine study. Give it one primary learning outcome and no more than 2–3 closely related supporting outcomes; state them concretely in the 1–2 sentence summary.
+- If an outcome cannot be taught adequately in 30 minutes, divide it into multiple lessons rather than compressing or oversimplifying it.
 - Prefer fewer ideas taught thoroughly over broad survey coverage.
 - Avoid overlap between lessons and avoid assigning a lesson concepts that depend on later lessons.
-- Keep the course focused on the concrete capability in the learner's goals.${feedbackInstructions}`,
+- Keep the course focused on the concrete capability in the learner's goals.`,
     schema: CourseV1,
-    maxTokens: MAX_TOKENS,
   });
 
   return CourseV1.parse({ ...generated, topic });
@@ -268,7 +206,7 @@ Requirements:
 function replaceCourseOutline(
   courseId: string,
   outline: Course,
-  status: "outline_review",
+  status: "generating",
 ) {
   db.transaction((transaction) => {
     transaction.delete(modules).where(eq(modules.courseId, courseId)).run();
@@ -317,39 +255,78 @@ function replaceCourseOutline(
   });
 }
 
-export async function submitIntakeAnswers(
+export async function continueCourseIntake(
   courseId: string,
-  answers: LearnerAnswers,
-): Promise<void> {
+  message: string,
+) {
   const course = await db.query.courses.findFirst({
     where: eq(courses.id, courseId),
   });
   if (!course) throw new Error("Course not found.");
-  if (!course.intakeQuestions) {
-    throw new Error("This course does not have intake questions.");
+  if (course.status !== "intake") {
+    throw new Error("This course intake has already finished.");
   }
 
-  const intakeQuestions = IntakeQuestionsV1.parse(
-    JSON.parse(course.intakeQuestions),
-  );
-  const normalizedAnswers = normalizeIntakeAnswers(intakeQuestions, answers);
-  const learnerProfile = await requestLearnerProfile(
+  const conversation = course.intakeConversation
+    ? IntakeConversationV1.parse(JSON.parse(course.intakeConversation))
+    : initialIntakeConversation(course.topic);
+  const withLearnerReply = IntakeConversationV1.parse({
+    ...conversation,
+    messages: [
+      ...conversation.messages,
+      { role: "user", content: message.trim() },
+    ],
+  });
+  const response = await requestIntakeChatTurn(
     course.topic,
-    normalizedAnswers,
+    withLearnerReply,
   );
+  const updatedConversation = IntakeConversationV1.parse({
+    ...withLearnerReply,
+    messages: [
+      ...withLearnerReply.messages,
+      { role: "assistant", content: response.reply },
+    ],
+  });
+  const learnerProfile = response.profile
+    ? LearnerProfileV1.parse({
+        schemaVersion: 1,
+        answers: conversationAnswers(updatedConversation),
+        ...response.profile,
+      })
+    : null;
 
   db.update(courses)
     .set({
-      learnerProfile: JSON.stringify(learnerProfile),
-      status: "outlining",
+      intakeConversation: JSON.stringify(updatedConversation),
+      learnerProfile: learnerProfile ? JSON.stringify(learnerProfile) : null,
+      status: learnerProfile ? "outlining" : "intake",
       error: null,
     })
     .where(eq(courses.id, courseId))
     .run();
 
+  return {
+    conversation: updatedConversation,
+    ready: learnerProfile !== null,
+  };
+}
+
+export async function designCourseFromIntake(courseId: string): Promise<void> {
+  const course = await db.query.courses.findFirst({
+    where: eq(courses.id, courseId),
+  });
+  if (!course) throw new Error("Course not found.");
+  if (!course.learnerProfile) {
+    throw new Error("Complete the course conversation before designing it.");
+  }
+  const learnerProfile = LearnerProfileV1.parse(
+    JSON.parse(course.learnerProfile),
+  );
   try {
     const outline = await requestOutline(course.topic, learnerProfile);
-    replaceCourseOutline(courseId, outline, "outline_review");
+    replaceCourseOutline(courseId, outline, "generating");
+    await startFirstLesson(courseId);
   } catch (error) {
     db.update(courses)
       .set({ status: "failed", error: errorMessage(error) })
@@ -357,30 +334,6 @@ export async function submitIntakeAnswers(
       .run();
     throw error;
   }
-}
-
-export async function regenerateOutline(
-  courseId: string,
-  feedback: string,
-): Promise<void> {
-  if (!feedback.trim()) throw new Error("Outline feedback cannot be empty.");
-
-  const course = await db.query.courses.findFirst({
-    where: eq(courses.id, courseId),
-  });
-  if (!course) throw new Error("Course not found.");
-  if (!course.learnerProfile) {
-    throw new Error("Complete learner intake before regenerating the outline.");
-  }
-  const learnerProfile = LearnerProfileV1.parse(
-    JSON.parse(course.learnerProfile),
-  );
-  const outline = await requestOutline(
-    course.topic,
-    learnerProfile,
-    feedback,
-  );
-  replaceCourseOutline(courseId, outline, "outline_review");
 }
 
 async function loadGenerationContext(courseId: string) {
@@ -471,7 +424,7 @@ function conceptLedgerForLesson(
 
   return ordered.slice(0, targetIndex).flatMap((lesson) => {
     if (lesson.status !== "ready" || !lesson.content) return [];
-    const parsed = LessonContentV2.safeParse(JSON.parse(lesson.content));
+    const parsed = LessonContentStructured.safeParse(JSON.parse(lesson.content));
     if (!parsed.success) return [];
     return [
       {
@@ -493,7 +446,49 @@ ${JSON.stringify(issuesToFix, null, 2)}
 Correct every listed issue while continuing to meet all lesson requirements.`;
 }
 
-async function requestLessonPlan({
+function normalizeLessonVisualReferences(
+  content: LessonContentDraft,
+): LessonContentDraft {
+  const usedVisualIds = new Set<string>();
+  const sectionsWithUniqueVisualIds = content.sections.map((section) => ({
+    ...section,
+    blocks: section.blocks.map((block) => {
+      if (block.type !== "visual") return block;
+
+      let id = block.id;
+      let suffix = 2;
+      while (usedVisualIds.has(id)) {
+        id = `${block.id}-${suffix}`;
+        suffix += 1;
+      }
+      usedVisualIds.add(id);
+      return id === block.id ? block : { ...block, id };
+    }),
+  }));
+
+  return {
+    ...content,
+    sections: sectionsWithUniqueVisualIds.map((section) => ({
+      ...section,
+      blocks: section.blocks.map((block) =>
+        block.type === "exercise" &&
+        block.visualId &&
+        !usedVisualIds.has(block.visualId)
+          ? { ...block, visualId: undefined }
+          : block,
+      ),
+    })),
+    quiz: {
+      questions: content.quiz.questions.map((question) =>
+        question.visualId && !usedVisualIds.has(question.visualId)
+          ? { ...question, visualId: undefined }
+          : question,
+      ),
+    },
+  };
+}
+
+async function requestLessonContent({
   outline,
   learnerProfile,
   conceptLedger,
@@ -507,186 +502,72 @@ async function requestLessonPlan({
   targetModule: { title: string; objective: string };
   targetLesson: { title: string; summary: string };
   issuesToFix: LessonReviewIssue[];
-}): Promise<LessonPlan> {
+}): Promise<LessonContent> {
   const generated = await generateStructured({
-    model: MODEL,
     system:
-      "You plan one rigorous lesson at a time. Plan for genuine study time, explicit prerequisite handling, and deep understanding rather than name-dropping or survey-style breadth.",
-    prompt: `Plan the full lesson described below.
+      "You are an expert teacher writing one substantial lesson in a larger course. Teach patiently from the learner's actual knowledge boundary, with precise definitions, causal explanations, fully worked examples, and useful practice.",
+    prompt: `Write the complete content for the target lesson.
 
-Course outline:
-${JSON.stringify(outline, null, 2)}
+Course context:
+${JSON.stringify(
+  {
+    title: outline.title,
+    description: outline.description,
+    difficulty: outline.difficulty,
+    modules: outline.modules,
+  },
+  null,
+  2,
+)}
 
 Learner profile:
-${JSON.stringify(learnerProfile, null, 2)}
+${JSON.stringify(
+  {
+    derivedLevel: learnerProfile.derivedLevel,
+    goals: learnerProfile.goals,
+    background: learnerProfile.background,
+  },
+  null,
+  2,
+)}
 
-Concept ledger from earlier ready V2 lessons:
-${JSON.stringify(conceptLedger, null, 2)}
-
-Target module:
-${JSON.stringify(targetModule, null, 2)}
-
-Target lesson:
-${JSON.stringify(targetLesson, null, 2)}
-
-Planning requirements:
-- Use schemaVersion 1. Target 30–60 minutes of real study and divide that budget among 3–7 coherent sections whose minutes sum to estimatedMinutes.
-- Assume the learner knows ONLY what their profile states plus the concepts in the ledger. Do not silently assume any other background.
-- Every technical term, proper noun, notation, or named concept not already in the ledger must be introduced and defined in plain language before its first use in an argument. Put every such term in keyTermsToIntroduce.
-- Do not forward-reference or teach material assigned to later lessons in the course outline.
-- Plan each section to motivate its idea, explain it carefully, and include at least one fully worked example showing every intermediate step. No “it follows that” jumps.
-- Most sections must include a worthwhile exercise with a hint and a complete worked solution.
-- Depth beats breadth: three ideas taught thoroughly beat eight ideas taught superficially.
-- Fill every section's minutes with substantive teaching, examples, and practice—never filler, restatement, or padding.
-- Make mustCover concrete enough that a section writer cannot substitute vague overview prose.${reviewFixInstructions(issuesToFix)}`,
-    schema: LessonPlanV1,
-    maxTokens: MAX_TOKENS,
-  });
-
-  return LessonPlanV1.parse(generated);
-}
-
-function blockText(block: LessonSection["blocks"][number]): string {
-  if (block.type === "explanation") return block.markdown;
-  if (block.type === "example") {
-    return `Worked example: ${block.title}\n${block.markdown}`;
-  }
-  if (block.type === "callout") {
-    return `${block.variant}: ${block.markdown}`;
-  }
-  return `Exercise:\n${block.prompt}\nHint:\n${block.hint}\nSolution:\n${block.solution}`;
-}
-
-function fullSectionText(sections: LessonSection[]): string {
-  if (sections.length === 0) return "No sections have been written yet.";
-  return sections
-    .map(
-      (section) =>
-        `# ${section.heading}\n\n${section.blocks.map(blockText).join("\n\n")}`,
-    )
-    .join("\n\n");
-}
-
-async function requestLessonSection({
-  outline,
-  learnerProfile,
-  conceptLedger,
-  plan,
-  plannedSection,
-  completedSections,
-  targetModule,
-  targetLesson,
-  issuesToFix,
-}: {
-  outline: Course;
-  learnerProfile: LearnerProfile;
-  conceptLedger: ConceptLedgerEntry[];
-  plan: LessonPlan;
-  plannedSection: LessonPlan["sections"][number];
-  completedSections: LessonSection[];
-  targetModule: { title: string; objective: string };
-  targetLesson: { title: string; summary: string };
-  issuesToFix: LessonReviewIssue[];
-}): Promise<LessonSection> {
-  const generated = await generateStructured({
-    model: MODEL,
-    system:
-      "You are an expert teacher writing one substantial section of a longer lesson. Teach patiently from the learner's actual knowledge boundary, with precise definitions, causal explanations, fully worked examples, and useful practice.",
-    prompt: `Write the blocks for exactly one planned lesson section.
-
-Course outline:
-${JSON.stringify(outline, null, 2)}
-
-Learner profile:
-${JSON.stringify(learnerProfile, null, 2)}
-
-Concept ledger from earlier ready V2 lessons:
+Concept ledger from earlier ready structured lessons:
 ${JSON.stringify(conceptLedger, null, 2)}
 
 Target module and lesson:
 ${JSON.stringify({ targetModule, targetLesson }, null, 2)}
 
-Full lesson plan:
-${JSON.stringify(plan, null, 2)}
-
-Section to write now:
-${JSON.stringify(plannedSection, null, 2)}
-
-Full text of sections already generated for this lesson:
-${fullSectionText(completedSections)}
+${COURSE_STYLE_RULES}
 
 Writing requirements:
-- Return only the blocks for the named section. Write all prose in Markdown.
-- Assume the learner knows ONLY what their profile states plus concepts in the ledger and material already explained in this lesson. Explain everything else from scratch at first use.
+- Use schemaVersion 4. Target 20–30 minutes total in 3–4 coherent sections, including examples, activities, and checks. Set each section's minutes and make their sum equal estimatedMinutes.
+- Write all prose in Markdown.
+- Assume the learner knows ONLY what their profile states plus concepts in the ledger. Explain everything else from scratch at first use.
 - Define every new technical term, proper noun, notation, or named concept in plain language before using it in an argument. Never substitute a name for an explanation.
-- Stay inside this section's objective and mustCover list. Do not forward-reference or teach material assigned to later lessons.
-- First motivate the idea, then explain it step by step, then give at least one fully worked example block. Show every intermediate step and explain why it is valid; never say “it follows that” to skip reasoning.
-- Include an exercise block unless this section is genuinely unsuitable for practice. Across the lesson, most sections must have exercises. Every exercise needs a useful hint and a complete solution that shows the reasoning.
+- Stay inside the target lesson's scope. Do not forward-reference or teach material assigned to later lessons.
+- Make the first section open with the concrete capability this lesson builds and frame it around a meaningful question, problem, or practical use. Connect to relevant prior knowledge before introducing new material.
+- Develop one continuous explanatory narrative across sections. Explain ideas step by step and distribute closely matched worked examples wherever they make the material concrete; include at least one in the lesson, but do not force one into a section where it would interrupt the narrative. Show every important intermediate step and why it is valid; never say “it follows that” to skip reasoning.
+- Put an exercise block after each important section as an activity or knowledge check. Every exercise needs a useful hint and a complete solution that diagnoses likely misunderstandings, not merely the answer.
+- Make the final section include a concise narrative conclusion that reinforces the primary outcome and, when appropriate, connects it to the next lesson in the outline.
+- Add visual blocks wherever seeing the information is materially better than verbal description. Geography and spatial-comparison lessons should normally contain a map; quantitative comparisons or trends should use a chart; systems, sequences, and causal relationships should use a diagram.
+- For maps, use exact present-day country or U.S. state names in highlightedRegions and latitude/longitude markers for specific places. The renderer supplies authoritative base geography; do not invent polygon coordinates. A region label is visible map text: use distinct labels only when each belongs inside one specific region. When several regions share one category, give them the exact same label so the renderer groups it into one legend entry rather than printing it repeatedly.
+- For charts, include only values you can state accurately from the lesson context. Never fabricate statistics to make a chart. Prefer a diagram when exact quantitative data is unavailable.
+- Give every visual a unique stable id, useful title and caption, and complete altText that communicates its instructional meaning without merely listing colors.
+- When an exercise or quiz question requires interpreting a visual, set visualId to that visual's id and make the answer depend on evidence visible in it. Do not set visualId for questions that can be answered without the visual.
+- Do not repeat the visual's entire content in nearby prose before asking the learner to interpret it.
 - Use callouts sparingly and only for a genuine warning, tip, or clarifying analogy.
-- Write enough substantive explanation, examples, and practice to occupy the planned ${plannedSection.minutes} minutes. Never pad with filler, restatement, generic encouragement, or repeated summaries.
-- Depth beats breadth. Teach a few ideas until the learner can use them.${reviewFixInstructions(issuesToFix)}`,
-    schema: GeneratedSectionBlocksV2,
-    maxTokens: MAX_TOKENS,
-  });
-  const { blocks } = GeneratedSectionBlocksV2.parse(generated);
-  return LessonSectionV2.parse({
-    heading: plannedSection.heading,
-    minutes: plannedSection.minutes,
-    blocks,
-  });
-}
-
-async function requestLessonFinish({
-  outline,
-  learnerProfile,
-  conceptLedger,
-  plan,
-  targetLesson,
-  sections,
-}: {
-  outline: Course;
-  learnerProfile: LearnerProfile;
-  conceptLedger: ConceptLedgerEntry[];
-  plan: LessonPlan;
-  targetLesson: { title: string; summary: string };
-  sections: LessonSection[];
-}) {
-  const generated = await generateStructured({
-    model: MODEL,
-    system:
-      "You create faithful lesson glossaries and rigorous final quizzes from supplied teaching material. Assess understanding and application, not trivia or wording recall.",
-    prompt: `Create the key-term glossary and final quiz for this assembled lesson.
-
-Course outline:
-${JSON.stringify(outline, null, 2)}
-
-Learner profile:
-${JSON.stringify(learnerProfile, null, 2)}
-
-Concept ledger from earlier ready V2 lessons:
-${JSON.stringify(conceptLedger, null, 2)}
-
-Target lesson:
-${JSON.stringify(targetLesson, null, 2)}
-
-Full lesson plan:
-${JSON.stringify(plan, null, 2)}
-
-Assembled lesson sections:
-${fullSectionText(sections)}
-
-Requirements:
-- Define at least 3 important terms introduced by this lesson in concise plain language. Include the plan's keyTermsToIntroduce and do not list terms that appear only in later lessons.
+- Write enough substantive explanation, examples, and practice to occupy the stated time. Never pad with filler, restatement, generic encouragement, or repeated summaries.
+- Depth beats breadth. Teach a few ideas until the learner can use them.
+- Add a glossary of at least 3 important terms introduced by this lesson, with concise plain-language definitions. Do not list terms assigned to later lessons.
 - Write 3–6 quiz questions spanning the lesson's important objectives.
-- Test whether the learner can explain or apply what the sections taught. Do not test facts absent from the assembled sections.
+- Test whether the learner can explain or apply what the lesson taught. Do not test facts absent from the lesson sections.
 - Every question must have exactly 4 plausible choices and one correctIndex from 0–3.
 - Supply exactly 4 per-choice explanations for each question, aligned by index, explaining specifically why that choice is right or wrong.
-- Avoid trick wording, trivia, and choices distinguishable by superficial cues.`,
-    schema: LessonFinishV2,
-    maxTokens: MAX_TOKENS,
+- Avoid trick wording, trivia, and choices distinguishable by superficial cues.${reviewFixInstructions(issuesToFix)}`,
+    schema: LessonContentV4Draft,
   });
 
-  return LessonFinishV2.parse(generated);
+  return LessonContentV4.parse(normalizeLessonVisualReferences(generated));
 }
 
 async function reviewLesson({
@@ -699,7 +580,6 @@ async function reviewLesson({
   content: LessonContent;
 }): Promise<LessonReview> {
   const review = await generateStructured({
-    model: REVIEW_MODEL,
     system:
       "You are a meticulous course quality reviewer. Evaluate the supplied lesson independently and report only specific, actionable content problems. This review is advisory; do not rewrite the lesson.",
     prompt: `Review this generated lesson in the context of its assigned course outline.
@@ -727,6 +607,8 @@ ${JSON.stringify(content, null, 2)}
 
 Check all of the following:
 - Factual accuracy of claims in every explanation and worked example.
+- Whether the lesson follows the supplied 20–30 minute scope and coherent textbook-like narrative rather than reading as disconnected notes.
+- Whether maps, charts, and diagrams are accurate, legible from their structured data, instructionally necessary, and correctly referenced by activities or quiz questions.
 - Whether the lesson stays within its assigned title and summary.
 - Whether it substantially teaches material owned by another lesson in the outline.
 - Whether every quiz correctIndex points to the actually correct choice.
@@ -734,8 +616,6 @@ Check all of the following:
 
 List every specific issue you find. Use severity "major" when the problem could materially misteach or misassess the learner; otherwise use "minor" for advisory improvements. Return passed=false only when there is at least one major issue. Minor issues may be present when passed=true.`,
     schema: LessonReviewV1,
-    maxTokens: MAX_TOKENS,
-    backend: REVIEW_BACKEND,
   });
 
   return LessonReviewV1.parse(review);
@@ -767,46 +647,13 @@ async function generateClaimedLesson(
       title: targetModule.title,
       objective: targetModule.objective,
     };
-    const plan = await requestLessonPlan({
+    const validated = await requestLessonContent({
       outline,
       learnerProfile,
       conceptLedger,
       targetModule: moduleContext,
       targetLesson,
       issuesToFix,
-    });
-
-    const sections: LessonSection[] = [];
-    for (const plannedSection of plan.sections) {
-      sections.push(
-        await requestLessonSection({
-          outline,
-          learnerProfile,
-          conceptLedger,
-          plan,
-          plannedSection,
-          completedSections: sections,
-          targetModule: moduleContext,
-          targetLesson,
-          issuesToFix,
-        }),
-      );
-    }
-
-    const finish = await requestLessonFinish({
-      outline,
-      learnerProfile,
-      conceptLedger,
-      plan,
-      targetLesson,
-      sections,
-    });
-    const validated = LessonContentV2.parse({
-      schemaVersion: 2,
-      estimatedMinutes: plan.estimatedMinutes,
-      keyTerms: finish.keyTerms,
-      sections,
-      quiz: finish.quiz,
     });
 
     let reviewStatus: "passed" | "flagged" | null = null;
@@ -837,7 +684,7 @@ async function generateClaimedLesson(
         conceptsTaught: JSON.stringify(
           validated.keyTerms.map(({ term }) => term),
         ),
-        plan: JSON.stringify(plan),
+        plan: null,
         estimatedMinutes: validated.estimatedMinutes,
         error: null,
         reviewStatus,
@@ -957,7 +804,7 @@ export async function generateModuleLessons(moduleId: string): Promise<void> {
   await refreshCourseStatus(courseModule.courseId);
 }
 
-export async function approveOutline(courseId: string): Promise<boolean> {
+async function startFirstLesson(courseId: string): Promise<boolean> {
   const { moduleRows, lessonRows } = await loadGenerationContext(courseId);
   const firstLesson = orderedLessons(moduleRows, lessonRows)[0];
   if (!firstLesson) throw new Error("The course outline has no lessons.");

@@ -48,13 +48,13 @@ export function CreateCourseForm() {
           autoComplete="off"
         />
         <button className="button" type="submit" disabled={submitting || topic.trim().length < 2}>
-          {submitting ? "Preparing questions…" : "Create course"}
+          {submitting ? "Starting…" : "Create course"}
         </button>
       </div>
       <p className={`form-note ${error ? "error-text" : ""}`} role="status">
         {error ??
           (submitting
-            ? "Preparing a short intake so the course fits how you learn."
+            ? "Opening a quick conversation with your course designer."
             : "")}
       </p>
     </form>

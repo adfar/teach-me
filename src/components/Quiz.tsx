@@ -1,11 +1,20 @@
 "use client";
 
 import { useState } from "react";
-import type { QuizQuestionV1 } from "@/lib/course-schema";
+import type { QuizQuestionV1, VisualBlockV4 } from "@/lib/course-schema";
+import { LessonVisual } from "./LessonVisual";
 
 type SaveStatus = "idle" | "saving" | "saved" | "failed";
 
-export function Quiz({ lessonId, questions }: { lessonId: string; questions: QuizQuestionV1[] }) {
+export function Quiz({
+  lessonId,
+  questions,
+  visualsById = {},
+}: {
+  lessonId: string;
+  questions: QuizQuestionV1[];
+  visualsById?: Record<string, VisualBlockV4>;
+}) {
   const [answers, setAnswers] = useState<Array<number | null>>(
     () => questions.map(() => null),
   );
@@ -57,11 +66,15 @@ export function Quiz({ lessonId, questions }: { lessonId: string; questions: Qui
       {questions.map((question, questionIndex) => {
         const selected = answers[questionIndex];
         const isCorrect = selected === question.correctIndex;
+        const visual = question.visualId
+          ? visualsById[question.visualId]
+          : undefined;
         return (
           <fieldset className="question-card" key={question.prompt}>
             <legend className="question-prompt">
               {questionIndex + 1}. {question.prompt}
             </legend>
+            {visual && <LessonVisual block={visual} compact />}
             <div className="choices">
               {question.choices.map((choice, choiceIndex) => {
                 const isSelected = selected === choiceIndex;

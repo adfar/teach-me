@@ -12,9 +12,9 @@ export async function POST(request: Request) {
   try {
     const body: unknown = await request.json();
     const { topic } = createCourseRequest.parse(body);
-    const { courseId, intakeQuestions } = await startCourseIntake(topic);
+    const { courseId, conversation } = await startCourseIntake(topic);
 
-    return NextResponse.json({ courseId, intakeQuestions }, { status: 201 });
+    return NextResponse.json({ courseId, conversation }, { status: 201 });
   } catch (error) {
     const message =
       error instanceof z.ZodError

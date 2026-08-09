@@ -41,7 +41,7 @@ export default async function LessonPage({
 
   const estimatedMinutes =
     lesson.estimatedMinutes ??
-    (content.schemaVersion === 2 ? content.estimatedMinutes : null);
+    (content.schemaVersion !== 1 ? content.estimatedMinutes : null);
 
   return (
     <article className="reading-shell">

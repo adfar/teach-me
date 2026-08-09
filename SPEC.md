@@ -1,13 +1,12 @@
 # teach-me — Phase 1 Specification
 
 An AI-powered learning web app. The user types a topic ("teach me linear algebra"),
-the app generates a complete structured course via the Claude API, archives it in a
-local SQLite database, and renders it from the archive from then on. Generation
-happens once per course; reading is instant and free.
+the app generates a structured course through the locally authenticated Codex CLI,
+archives it in a local SQLite database, and renders it from the archive from then
+on. Lessons generate on demand; archived reading is instant and free.
 
-This spec is the contract for phase 1. Where it prescribes exact API shapes
-(especially Anthropic SDK usage), follow them exactly — they reflect the current
-API, which has breaking changes newer than most training data.
+This spec is the contract for phase 1. Preserve the structured-output and Zod
+validation boundaries described here when changing generation behavior.
 
 ---
 
@@ -16,14 +15,15 @@ API, which has breaking changes newer than most training data.
 - **Next.js 15+ (App Router) + TypeScript**, `create-next-app` defaults (ESLint, Tailwind CSS, `src/` dir, `@/*` alias)
 - **Drizzle ORM + better-sqlite3** — DB file at `./data/teach-me.db` (gitignore `data/`)
 - **Zod** for the course schema (single source of truth for both generation and rendering types)
-- **@anthropic-ai/sdk** (latest) for generation
-- `ANTHROPIC_API_KEY` read from `.env.local` (gitignored). Ship a `.env.example` with the variable name. All Anthropic calls happen server-side only.
+- **Codex CLI** for generation, authenticated locally with `codex login`
+- **`gpt-5.6-sol` at `high` reasoning** for intake, outline, lesson, and review calls
 - Markdown rendering: `react-markdown` + `remark-gfm`
 
 ## 2. The course framework — `CourseV1`
 
 Define in `src/lib/course-schema.ts`. This versioned Zod schema is the canonical
 shape of every course. All TypeScript types derive from it via `z.infer`.
+Course design and lesson prose must follow [`COURSE_STYLE_GUIDE.md`](./COURSE_STYLE_GUIDE.md).
 
 ```
 CourseV1
@@ -76,8 +76,10 @@ courses
   difficulty    text
   prerequisites text (JSON array)
   schemaVersion integer not null default 1
-  status        text not null      // "generating" | "ready" | "failed"
+  status        text not null      // "intake" | "outlining" | "generating" | "ready" | "failed"
   error         text               // populated when status = "failed"
+  learnerProfile text              // JSON profile synthesized by the intake chat
+  intakeConversation text          // JSON persisted conversation
   createdAt     integer (epoch ms)
 
 modules
@@ -112,63 +114,60 @@ predev script) so `npm run dev` works from a fresh clone with zero manual steps.
 Two-pass design. **Pass 1** creates the course outline; **pass 2** fills in each
 lesson with the outline as context so lessons don't overlap or contradict.
 
-### Anthropic SDK usage — follow exactly (current API; training priors are stale)
+### Backend and model usage
 
-- Model: **`claude-opus-5`** for both passes.
-- Use structured outputs via **`client.messages.parse`** with
-  `output_config: { format: zodOutputFormat(Schema) }` where `zodOutputFormat`
-  comes from `@anthropic-ai/sdk/helpers/zod`. Read the result from
-  `response.parsed_output` (nullable — treat null as a retryable failure).
-- Set `thinking: { type: "adaptive" }` explicitly; do not use `budget_tokens`
-  (returns a 400). Note: on Opus 5, thinking is on by default even without
-  this field — the explicit setting is equivalent, so it's kept for clarity
-  and to pin behavior if the default ever changes.
-- **Do not pass `temperature`, `top_p`, or `top_k`** — all three return a 400 on
-  Opus models.
-- Do not use assistant-message prefills — they return a 400.
-- `max_tokens: 16000` for both passes (a single lesson or outline fits well
-  within this; stays under SDK HTTP-timeout thresholds without streaming).
-- Structured-output JSON schemas do not support numeric/length constraints
-  (`minItems`, `minimum`, etc.) — the Python/TS SDKs strip them and validate
-  client-side, which is fine, but express hard requirements (counts, ordering)
-  in the **prompt text** and verify with the `superRefine` from §2.
-- Wrap calls with retry: on `RateLimitError` or `InternalServerError`
-  (`instanceof` checks from the SDK, not message matching) retry up to 2 times
-  with exponential backoff; the SDK's built-in retries handle the rest.
+- Every generation role uses **`gpt-5.6-sol`** at **`high`** reasoning through
+  the locally authenticated Codex CLI. There is no alternate provider or
+  role-specific model routing.
+- Each call runs ephemerally with a read-only sandbox and receives the system
+  prompt, task prompt, and JSON Schema over an isolated structured-output path.
+  The final JSON is parsed again with the canonical Zod schema before use.
+- Retry transient CLI, network, timeout, overload, and rate-limit failures up to
+  two times with exponential backoff. Treat authentication and configuration
+  errors as non-retryable and surface a useful action to the user.
+- `CODEX_TIMEOUT_MS` controls the per-attempt timeout and defaults to 300000.
 
-### Pass 1 — outline
+### Pass 1 — conversation and outline
 
-One `messages.parse` call. System prompt establishes the app's teaching
-philosophy (clear explanations, concrete examples, build concepts in dependency
-order). User message contains the topic. Output: `CourseV1` (with lesson
-outlines only). Persist the course + modules + lessons rows (`status: "pending"`)
-before starting pass 2.
+Creating a course stores the topic immediately and opens a short conversational
+intake. Each turn asks at most one adaptive follow-up, and the intake ends as
+soon as the desired capability, relevant background, and material constraints
+are clear (three learner replies maximum). The final turn returns the compact
+learner profile. One outline call then produces `CourseV1`; persist its modules
+and pending lessons and start the first lesson automatically. There is no survey
+or outline-approval step.
 
 ### Pass 2 — lessons
 
-For each lesson, one `messages.parse` call producing `LessonContentV1`. The
-prompt includes: course title/description/difficulty, the full outline (module
-and lesson titles + summaries) so the model knows what is covered elsewhere,
-which lessons precede this one, and this lesson's title + summary. Instruct it
-explicitly: markdown prose, at least one worked example, exactly one quiz as the
-final block with 4 choices and 4 per-choice explanations per question, 2–4
-questions.
+For each lesson, one structured generation call produces `LessonContentV4` in
+full. The prompt includes course title/description/difficulty, the outline,
+the compact learner profile, the concept ledger from ready preceding lessons,
+and the target module/lesson. Generate 3–4 substantive sections with worked
+examples and exercises, plus the glossary and final quiz, in that same call.
+Do not build sections through separate calls or resend previously generated
+section text: that creates quadratic prompt growth and quickly exhausts token
+limits. An independent advisory review may follow.
+V4 adds structured chart, diagram, and geographic-map blocks plus visual-aware
+exercise and quiz references. Maps render against packaged world/U.S. atlas data;
+charts and diagrams render from validated structured data. `LessonContentV1`,
+`LessonContentV2`, and `LessonContentV3` remain readable for archived courses.
 
-- Run with a **concurrency limit of 3** (simple semaphore; no new dependency
-  needed).
-- Update each lesson row to `generating` → `ready` (with content JSON) or
-  `failed` (with error message) as it completes.
+- Generate lessons on demand. Start the first lesson after outline design, warm
+  the next lesson when the learner opens one, and allow explicit lesson/unit
+  generation from the overview.
+- Update each generated lesson row to `generating` → `ready` (with content JSON)
+  or `failed` (with error message) as it completes.
 - When all lessons are terminal: course `status` = `ready` if all lessons are
   ready, else `failed` (but keep successfully generated lessons).
 
 ### Kickoff and progress
 
-- `POST /api/courses` `{ topic }` → runs pass 1 **awaited** (so validation
-  errors surface in the response), inserts rows, kicks off pass 2 **without
-  awaiting** (fire-and-forget promise; fine in a long-lived local Node server),
-  and returns `{ courseId }` immediately after the outline exists.
+- `POST /api/courses` `{ topic }` → stores an intake course immediately and
+  returns `{ courseId }`.
+- `POST /api/courses/:id/intake` `{ message }` → advances the short chat. Once
+  ready, it starts outline design and first-lesson generation without awaiting.
 - `GET /api/courses/:id` → course + modules + lesson rows (status, no content) —
-  the create page polls this every ~1.5s to render live progress.
+  the overview polls this every ~1.5s while outline or lesson work is active.
 - `POST /api/lessons/:id/retry` → regenerates a single `failed` lesson.
 
 ## 5. Routes and pages
@@ -176,6 +175,7 @@ questions.
 | Route | Purpose |
 |---|---|
 | `/` | Course library: grid of course cards (title, difficulty, module count, per-course progress %, status badge for generating/failed). Prominent "Teach me…" input that POSTs to `/api/courses` and navigates to the course page. Empty state invites the first topic. |
+| `/courses/[id]/intake` | Short conversational intake. One adaptive question at a time; automatically proceeds to course design when enough context is available. |
 | `/courses/[id]` | Course overview: description, prerequisites, module list with lesson links and per-lesson status/progress. While `status = "generating"`, polls and shows a live checklist of lessons filling in (spinner → check). Failed lessons show a retry button. |
 | `/courses/[id]/lessons/[lessonId]` | Lesson reader: renders the block sequence (markdown via react-markdown; callout variants visually distinct; examples in a bordered card). Quiz is interactive: pick an answer per question → immediate right/wrong + the explanation for the chosen answer → after all questions answered, show score, persist to `progress` (via `POST /api/lessons/:id/progress`), and mark the lesson complete. Prev/next lesson navigation across module boundaries. |
 
@@ -186,9 +186,9 @@ quiz, and creation flow.
 ## 6. Quality bar
 
 - `npm run build` and `npm run lint` pass clean.
-- Zero manual setup beyond `npm install` + adding `ANTHROPIC_API_KEY` to
-  `.env.local` (DB file and migrations auto-created).
-- No Anthropic key or SDK import reachable from client components.
+- Zero manual setup beyond `npm install` and `codex login` (DB file and
+  migrations auto-created).
+- No model runtime or credentials are reachable from client components.
 - All course/lesson JSON parsed through the Zod schemas at the read boundary
   (`JSON.parse` output is validated, not cast).
 - Errors are first-class: a failed generation shows what failed and offers
@@ -204,43 +204,7 @@ token-by-token lesson display, non-English content, deployment config.
 
 ---
 
-## 8. Phase 2 — Fable 5 migration
-
-Generation model changes from `claude-opus-5` to **`claude-fable-5`** for both
-passes (outline + lesson). This is not a pure constant swap — Fable 5 changes
-one piece of API behavior that the current retry logic doesn't account for.
-
-### What changes
-
-- `MODEL = "claude-fable-5"` in `src/lib/generate.ts`.
-- `thinking: { type: "adaptive" }` stays as-is — Fable 5 has thinking
-  permanently on (`{"type": "disabled"}` is rejected), and the adaptive form
-  remains valid and equivalent, so no code change needed here.
-- **Refusals are a new failure mode.** On Fable 5, a declined request comes
-  back as a normal 200 response with `stop_reason: "refusal"`, not an
-  exception — this is different from Opus, where nothing in this pipeline
-  currently distinguishes a refusal from "the model emitted nothing parseable."
-  Confirm the exact field(s) that carry the refusal/classifier detail against
-  the installed `@anthropic-ai/sdk` TypeScript types before implementing (the
-  docs describe the behavior but not the precise wire shape, and training
-  priors for this are stale — do not guess the field name).
-- In `withGenerationRetry` (or the call sites in `requestOutline` /
-  `generateLesson`), detect `stop_reason === "refusal"` and treat it as a
-  **non-retryable** failure with a distinct, clearly labeled error message
-  (e.g. `Content declined by safety classifier` plus whatever detail the SDK
-  exposes). Retrying a refusal on the same input wastes calls for no benefit —
-  don't fold it into the existing "parsed_output was null, retry" path.
-- This surfaces through the existing `lessons.error` / `courses.error` columns
-  and retry UI unchanged — no schema change needed for this part.
-- No live end-to-end test has been run yet against `claude-fable-5` (blocked
-  on API credits during phase 1 testing) — validate with a real course
-  generation once credits are available, specifically watching for: the
-  refusal path (hard to trigger deliberately for this content domain, so at
-  minimum confirm the code path type-checks and the non-refusal path works),
-  and total generation latency/cost versus Opus 5 (Fable 5 is priced higher
-  per token: $10/$50 per MTok vs $5/$25 for Opus 5).
-
-## 9. Phase 2 — Automated quality/consistency review
+## 8. Phase 2 — Automated quality/consistency review
 
 Structural validation (Zod, §2) guarantees shape but not content quality:
 nothing today checks factual accuracy, whether a lesson stayed in its assigned
@@ -264,11 +228,10 @@ what Zod already expresses.
 
 ### Pipeline change — `generate.ts`
 
-- After a lesson passes `LessonContentV1.parse` (i.e., structurally valid),
+- After a lesson passes `LessonContentV4.parse` (i.e., structurally valid),
   before marking it `ready`, call a new `reviewLesson()`:
-  - **Model: `claude-sonnet-5`** — a cheaper/faster model is appropriate here;
-    this is a secondary check, not primary generation, and doubling every
-    lesson's cost on the primary model isn't justified.
+  - **Model: `gpt-5.6-sol` at `high` reasoning**, matching every other
+    generation role.
   - Context passed in: the full lesson content, the course title/description,
     and the **outline only** (all module/lesson titles + summaries) rather
     than every other lesson's full content — enough to judge scope and
@@ -278,8 +241,8 @@ what Zod already expresses.
     what other lessons in the outline already own), whether quiz
     `correctIndex` values are actually correct and whether each of the 4
     `explanations` truthfully explains why its choice is right or wrong.
-  - Output via `messages.parse` + `zodOutputFormat(LessonReviewV1)`, same
-    pattern as the rest of the pipeline.
+  - Output through the Codex CLI with the `LessonReviewV1` JSON Schema, then
+    validate the result with Zod like the rest of the pipeline.
 - **Review is best-effort and advisory, never blocking:** if the review call
   itself fails (rate limit, network, refusal, etc.), catch it, leave
   `reviewStatus` / `reviewNotes` as `null`, and still mark the lesson `ready`.
